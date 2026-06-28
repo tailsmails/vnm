@@ -4,6 +4,7 @@ import math
 import rand
 import os
 import json
+import runtime
 
 #flag -O3
 #flag -ffast-math
@@ -268,6 +269,136 @@ fn zero_real(dest &Real, len int) {
 	}
 }
 
+struct MatmulArgs {
+	a         &Matrix
+	b         &Matrix
+	res       &Matrix
+	start_row int
+	end_row   int
+}
+
+fn matmul_worker(args MatmulArgs) {
+	unsafe {
+		cols_a := args.a.cols
+		cols_b := args.b.cols
+		for i in args.start_row .. args.end_row {
+			offset_res := i * cols_b
+			offset_a := i * cols_a
+			for k in 0 .. cols_a {
+				val_a := args.a.data[offset_a + k]
+				offset_b := k * cols_b
+				mut ptr_res := &args.res.data[offset_res]
+				mut ptr_b := &args.b.data[offset_b]
+				mut j := 0
+				for j < cols_b - 3 {
+					ptr_res[j] += val_a * ptr_b[j]
+					ptr_res[j+1] += val_a * ptr_b[j+1]
+					ptr_res[j+2] += val_a * ptr_b[j+2]
+					ptr_res[j+3] += val_a * ptr_b[j+3]
+					j += 4
+				}
+				for j < cols_b {
+					ptr_res[j] += val_a * ptr_b[j]
+					j++
+				}
+			}
+		}
+	}
+}
+
+@[inline; unsafe]
+fn matmul_inplace(a Matrix, b Matrix, mut res Matrix) {
+	unsafe {
+		if a.rows < 64 {
+			matmul_serial_inplace(a, b, mut res)
+			return
+		}
+		cols_b := b.cols
+		if cols_b == 1 {
+			matmul_serial_inplace(a, b, mut res)
+			return
+		}
+		zero_real(&res.data[0], res.data.len)
+		num_threads := runtime.nr_cpus()
+		mut threads := []thread{}
+		rows_per_thread := a.rows / num_threads
+		for t in 0 .. num_threads {
+			start := t * rows_per_thread
+			mut end := (t + 1) * rows_per_thread
+			if t == num_threads - 1 {
+				end = a.rows
+			}
+			if start >= end {
+				continue
+			}
+			threads << spawn matmul_worker(MatmulArgs{
+				a: &a
+				b: &b
+				res: &res
+				start_row: start
+				end_row: end
+			})
+		}
+		threads.wait()
+	}
+}
+
+@[inline; unsafe]
+fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
+	unsafe {
+		cols_a := a.cols
+		cols_b := b.cols
+		if cols_b == 1 {
+			mut ptr_res := &res.data[0]
+			mut ptr_a := &a.data[0]
+			ptr_b_start := &b.data[0]
+			for _ in 0 .. a.rows {
+				mut sum := Real(0.0)
+				mut ptr_b := ptr_b_start
+				mut k := 0
+				for k < cols_a - 3 {
+					sum += ptr_a[k] * ptr_b[k]
+					sum += ptr_a[k+1] * ptr_b[k+1]
+					sum += ptr_a[k+2] * ptr_b[k+2]
+					sum += ptr_a[k+3] * ptr_b[k+3]
+					k += 4
+				}
+				for k < cols_a {
+					sum += ptr_a[k] * ptr_b[k]
+					k++
+				}
+				*ptr_res = sum
+				ptr_res++
+				ptr_a += cols_a
+			}
+			return
+		}
+		zero_real(&res.data[0], res.data.len)
+		for i in 0 .. a.rows {
+			offset_res := i * cols_b
+			offset_a := i * cols_a
+			for k in 0 .. cols_a {
+				val_a := a.data[offset_a + k]
+				offset_b := k * cols_b
+				mut ptr_res := &res.data[offset_res]
+				mut ptr_b := &res.data[offset_b]
+				mut j := 0
+				for j < cols_b - 3 {
+					ptr_res[j] += val_a * ptr_b[j]
+					ptr_res[j+1] += val_a * ptr_b[j+1]
+					ptr_res[j+2] += val_a * ptr_b[j+2]
+					ptr_res[j+3] += val_a * ptr_b[j+3]
+					j += 4
+				}
+				for j < cols_b {
+					ptr_res[j] += val_a * ptr_b[j]
+					j++
+				}
+			}
+		}
+	}
+}
+
 @[inline; unsafe]
 fn matmul_transpose_b_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
@@ -299,12 +430,10 @@ fn matmul_transpose_a_inplace(a Matrix, b Matrix, mut res Matrix) {
 		zero_real(&res.data[0], res.data.len)
 		cols_a := a.cols
 		mut ptr_res := &res.data[0]
-		
 		for k in 0 .. a.rows {
 			val_b := b.data[k]
 			offset_a := k * cols_a
 			mut ptr_a := &a.data[offset_a]
-			
 			mut i := 0
 			for i < cols_a - 3 {
 				ptr_res[i] += ptr_a[i] * val_b
@@ -316,66 +445,6 @@ fn matmul_transpose_a_inplace(a Matrix, b Matrix, mut res Matrix) {
 			for i < cols_a {
 				ptr_res[i] += ptr_a[i] * val_b
 				i++
-			}
-		}
-	}
-}
-
-@[inline; unsafe]
-fn matmul_inplace(a Matrix, b Matrix, mut res Matrix) {
-	unsafe {
-		cols_a := a.cols
-		cols_b := b.cols
-		
-		if cols_b == 1 {
-			mut ptr_res := &res.data[0]
-			mut ptr_a := &a.data[0]
-			ptr_b_start := &b.data[0]
-			for _ in 0 .. a.rows {
-				mut sum := Real(0.0)
-				mut ptr_b := ptr_b_start
-				
-				mut k := 0
-				for k < cols_a - 3 {
-					sum += ptr_a[k] * ptr_b[k]
-					sum += ptr_a[k+1] * ptr_b[k+1]
-					sum += ptr_a[k+2] * ptr_b[k+2]
-					sum += ptr_a[k+3] * ptr_b[k+3]
-					k += 4
-				}
-				for k < cols_a {
-					sum += ptr_a[k] * ptr_b[k]
-					k++
-				}
-				*ptr_res = sum
-				ptr_res++
-				ptr_a += cols_a
-			}
-			return
-		}
-		
-		zero_real(&res.data[0], res.data.len)
-		for i in 0 .. a.rows {
-			offset_res := i * cols_b
-			offset_a := i * cols_a
-			for k in 0 .. cols_a {
-				val_a := a.data[offset_a + k]
-				offset_b := k * cols_b
-				mut ptr_res := &res.data[offset_res]
-				mut ptr_b := &b.data[offset_b]
-				
-				mut j := 0
-				for j < cols_b - 3 {
-					ptr_res[j] += val_a * ptr_b[j]
-					ptr_res[j+1] += val_a * ptr_b[j+1]
-					ptr_res[j+2] += val_a * ptr_b[j+2]
-					ptr_res[j+3] += val_a * ptr_b[j+3]
-					j += 4
-				}
-				for j < cols_b {
-					ptr_res[j] += val_a * ptr_b[j]
-					j++
-				}
 			}
 		}
 	}
@@ -411,7 +480,6 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 			}
 			return
 		}
-		
 		for i in 0 .. a.rows {
 			offset_res := i * cols_b
 			offset_a := i * cols_a
@@ -420,7 +488,6 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 				offset_b := k * cols_b
 				mut ptr_res := &res.data[offset_res]
 				mut ptr_b := &b.data[offset_b]
-				
 				mut j := 0
 				for j < cols_b - 3 {
 					ptr_res[j] += val_a * ptr_b[j]
