@@ -2,7 +2,6 @@ module vnm
 
 import math
 import rand
-import runtime
 import os
 import json
 
@@ -10,6 +9,113 @@ import json
 #flag -ffast-math
 #flag -march=native
 #flag -funroll-loops
+
+fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
+
+$if vnm_f64 ? {
+	pub type Real = f64
+} $else {
+	pub type Real = f32
+}
+
+@[inline]
+fn to_real_array(data []f64) []Real {
+	mut res := []Real{len: data.len}
+	unsafe {
+		for i in 0 .. data.len {
+			res[i] = Real(data[i])
+		}
+	}
+	return res
+}
+
+$if vnm_f64 ? {
+	@[inline]
+	fn fast_exp(x Real) Real {
+		if x < -700.0 { return Real(0.0) }
+		if x > 700.0 { return Real(1.7976931348623157e+308) }
+		
+		val_f := 6497334751787128.0 * x + 4607063855013146400.0
+		val_u := u64(val_f)
+		mut res := Real(0.0)
+		unsafe {
+			C.memcpy(&res, &val_u, sizeof(Real))
+		}
+		return res
+	}
+	
+	@[inline]
+	fn fast_inv_sqrt(x Real) Real {
+		mut xhalf := Real(0.5) * x
+		mut i := u64(0)
+		unsafe {
+			C.memcpy(&i, &x, sizeof(Real))
+		}
+		i = 0x5fe6eb50c7b537a9 - (i >> 1)
+		mut y := Real(0.0)
+		unsafe {
+			C.memcpy(&y, &i, sizeof(Real))
+		}
+		y = y * (Real(1.5) - xhalf * y * y)
+		y = y * (Real(1.5) - xhalf * y * y)
+		return y
+	}
+
+	@[inline]
+	fn fast_sqrt(x Real) Real {
+		return math.sqrt(x)
+	}
+} $else {
+	fn C.sqrtf(x f32) f32
+
+	@[inline]
+	fn fast_exp(x Real) Real {
+		if x < -88.0 { return Real(0.0) }
+		if x > 88.0 { return Real(3.40282347e+38) }
+		
+		val_f := 12102203.0 * x + 1064866816.0
+		val_u := u32(val_f)
+		mut res := Real(0.0)
+		unsafe {
+			C.memcpy(&res, &val_u, sizeof(Real))
+		}
+		return res
+	}
+	
+	@[inline]
+	fn fast_inv_sqrt(x Real) Real {
+		mut xhalf := Real(0.5) * x
+		mut i := u32(0)
+		unsafe {
+			C.memcpy(&i, &x, sizeof(Real))
+		}
+		i = 0x5f3759df - (i >> 1)
+		mut y := Real(0.0)
+		unsafe {
+			C.memcpy(&y, &i, sizeof(Real))
+		}
+		y = y * (Real(1.5) - xhalf * y * y)
+		return y
+	}
+
+	@[inline]
+	fn fast_sqrt(x Real) Real {
+		return C.sqrtf(x)
+	}
+}
+
+@[inline]
+fn fast_sigmoid(x Real) Real {
+	return Real(1.0) / (Real(1.0) + fast_exp(-x))
+}
+
+@[inline]
+fn fast_tanh(x Real) Real {
+	if x < Real(-5.0) { return Real(-1.0) }
+	if x > Real(5.0) { return Real(1.0) }
+	ex2 := fast_exp(Real(2.0) * x)
+	return (ex2 - Real(1.0)) / (ex2 + Real(1.0))
+}
 
 pub enum ActivationType {
 	sigmoid
@@ -27,14 +133,14 @@ pub struct Tensor {
 pub:
 	shape []int
 pub mut:
-	data []f64
+	data []Real
 }
 
 pub fn new_tensor(shape []int, data []f64) Tensor {
 	total_size := get_shape_size(shape)
-	mut actual_data := data.clone()
+	mut actual_data := to_real_array(data)
 	if data.len < total_size {
-		actual_data = []f64{len: total_size, init: 0.0}
+		actual_data = []Real{len: total_size, init: Real(0.0)}
 	}
 	return Tensor{
 		shape: shape
@@ -45,14 +151,14 @@ pub fn new_tensor(shape []int, data []f64) Tensor {
 pub fn vector(data []f64) Tensor {
 	return Tensor{
 		shape: [data.len, 1]
-		data: data.clone()
+		data: to_real_array(data)
 	}
 }
 
 pub fn scalar(val f64) Tensor {
 	return Tensor{
 		shape: [1, 1]
-		data: [val]
+		data: [Real(val)]
 	}
 }
 
@@ -91,22 +197,28 @@ pub:
 	rows int
 	cols int
 pub mut:
-	data []f64
+	data []Real
 }
 
 pub fn new_matrix(rows int, cols int) Matrix {
 	return Matrix{
 		rows: rows
 		cols: cols
-		data: []f64{len: rows * cols, init: 0.0}
+		data: []Real{len: rows * cols, init: Real(0.0)}
 	}
+}
+
+@[inline]
+fn rand_range(min Real, max Real) Real {
+	val := rand.f64_in_range(min, max) or { 0.0 }
+	return Real(val)
 }
 
 pub fn new_random_matrix(rows int, cols int) Matrix {
 	mut m := new_matrix(rows, cols)
-	boundary := math.sqrt(6.0 / f64(cols))
+	boundary := fast_sqrt(Real(6.0) / Real(cols))
 	for i in 0 .. m.data.len {
-		m.data[i] = rand.f64_in_range(-boundary, boundary) or { 0.0 }
+		m.data[i] = rand_range(-boundary, boundary)
 	}
 	return m
 }
@@ -139,17 +251,44 @@ pub fn (m &Matrix) free() {
 }
 
 @[inline; unsafe]
+fn copy_real(dest &Real, src &Real, len int) {
+	unsafe {
+		for i in 0 .. len {
+			dest[i] = src[i]
+		}
+	}
+}
+
+@[inline; unsafe]
+fn zero_real(dest &Real, len int) {
+	unsafe {
+		for i in 0 .. len {
+			dest[i] = Real(0.0)
+		}
+	}
+}
+
+@[inline; unsafe]
 fn matmul_transpose_b_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
 		mut ptr_res := &res.data[0]
+		b_len := b.rows * b.cols
 		for i in 0 .. a.rows {
 			val_a := a.data[i]
 			mut ptr_b := &b.data[0]
-			for _ in 0 .. b.rows {
-				*ptr_res = val_a * *ptr_b
-				ptr_res++
-				ptr_b++
+			mut j := 0
+			for j < b_len - 3 {
+				ptr_res[j] = val_a * ptr_b[j]
+				ptr_res[j+1] = val_a * ptr_b[j+1]
+				ptr_res[j+2] = val_a * ptr_b[j+2]
+				ptr_res[j+3] = val_a * ptr_b[j+3]
+				j += 4
 			}
+			for j < b_len {
+				ptr_res[j] = val_a * ptr_b[j]
+				j++
+			}
+			ptr_res += b_len
 		}
 	}
 }
@@ -157,19 +296,27 @@ fn matmul_transpose_b_inplace(a Matrix, b Matrix, mut res Matrix) {
 @[inline; unsafe]
 fn matmul_transpose_a_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
-		mut ptr_res := &res.data[0]
+		zero_real(&res.data[0], res.data.len)
 		cols_a := a.cols
-		for i in 0 .. cols_a {
-			mut sum := 0.0
-			mut ptr_a := &a.data[i]
-			mut ptr_b := &b.data[0]
-			for _ in 0 .. a.rows {
-				sum += *ptr_a * *ptr_b
-				ptr_a += cols_a
-				ptr_b++
+		mut ptr_res := &res.data[0]
+		
+		for k in 0 .. a.rows {
+			val_b := b.data[k]
+			offset_a := k * cols_a
+			mut ptr_a := &a.data[offset_a]
+			
+			mut i := 0
+			for i < cols_a - 3 {
+				ptr_res[i] += ptr_a[i] * val_b
+				ptr_res[i+1] += ptr_a[i+1] * val_b
+				ptr_res[i+2] += ptr_a[i+2] * val_b
+				ptr_res[i+3] += ptr_a[i+3] * val_b
+				i += 4
 			}
-			*ptr_res = sum
-			ptr_res++
+			for i < cols_a {
+				ptr_res[i] += ptr_a[i] * val_b
+				i++
+			}
 		}
 	}
 }
@@ -179,110 +326,115 @@ fn matmul_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
 		cols_a := a.cols
 		cols_b := b.cols
-		mut ptr_res := &res.data[0]
-		for i in 0 .. a.rows {
-			offset_a := i * cols_a
-			for j in 0 .. cols_b {
-				mut sum := 0.0
-				mut ptr_a := &a.data[offset_a]
-				mut ptr_b := &b.data[j]
-				for _ in 0 .. cols_a {
-					sum += *ptr_a * *ptr_b
-					ptr_a++
-					ptr_b += cols_b
+		
+		if cols_b == 1 {
+			mut ptr_res := &res.data[0]
+			mut ptr_a := &a.data[0]
+			ptr_b_start := &b.data[0]
+			for _ in 0 .. a.rows {
+				mut sum := Real(0.0)
+				mut ptr_b := ptr_b_start
+				
+				mut k := 0
+				for k < cols_a - 3 {
+					sum += ptr_a[k] * ptr_b[k]
+					sum += ptr_a[k+1] * ptr_b[k+1]
+					sum += ptr_a[k+2] * ptr_b[k+2]
+					sum += ptr_a[k+3] * ptr_b[k+3]
+					k += 4
+				}
+				for k < cols_a {
+					sum += ptr_a[k] * ptr_b[k]
+					k++
 				}
 				*ptr_res = sum
 				ptr_res++
+				ptr_a += cols_a
 			}
+			return
 		}
-	}
-}
-
-@[manualfree; unsafe]
-pub fn matmul_parallel(a Matrix, b Matrix) !Matrix {
-	if _unlikely_(a.cols != b.rows) {
-		return error("Matrix dimensions mismatch: ${a.cols} vs ${b.rows}")
-	}
-	mut result := new_matrix(a.rows, b.cols)
-	
-	if _likely_(a.rows < 64 || b.cols < 64) {
-		matmul_inplace(a, b, mut result)
-		return result
-	}
-
-	b_t := b.transpose()
-	num_cores := runtime.nr_jobs()
-	threads_count := if a.rows < num_cores { a.rows } else { num_cores }
-
-	mut threads := []thread{}
-	rows_per_thread := a.rows / threads_count
-
-	for t in 0 .. threads_count {
-		start_row := t * rows_per_thread
-		mut end_row := (t + 1) * rows_per_thread
-		if t == threads_count - 1 {
-			end_row = a.rows
-		}
-		worker := MatMulWorker{
-			a: &a
-			b_t: &b_t
-			res_data: unsafe { &result.data[0] }
-			start_row: start_row
-			end_row: end_row
-		}
-		threads << go worker.run()
-	}
-	threads.wait()
-	
-	b_t.free()
-	return result
-}
-
-struct MatMulWorker {
-	a         &Matrix
-	b_t       &Matrix
-	res_data  &f64
-	start_row int
-	end_row   int
-}
-
-fn (w MatMulWorker) run() {
-	unsafe {
-		cols_a := w.a.cols
-		cols_b := w.b_t.rows
-		for i in w.start_row .. w.end_row {
+		
+		zero_real(&res.data[0], res.data.len)
+		for i in 0 .. a.rows {
+			offset_res := i * cols_b
 			offset_a := i * cols_a
-			for j in 0 .. cols_b {
-				offset_b := j * cols_a
-				mut sum := 0.0
-				for k in 0 .. cols_a {
-					sum += w.a.data[offset_a + k] * w.b_t.data[offset_b + k]
+			for k in 0 .. cols_a {
+				val_a := a.data[offset_a + k]
+				offset_b := k * cols_b
+				mut ptr_res := &res.data[offset_res]
+				mut ptr_b := &b.data[offset_b]
+				
+				mut j := 0
+				for j < cols_b - 3 {
+					ptr_res[j] += val_a * ptr_b[j]
+					ptr_res[j+1] += val_a * ptr_b[j+1]
+					ptr_res[j+2] += val_a * ptr_b[j+2]
+					ptr_res[j+3] += val_a * ptr_b[j+3]
+					j += 4
 				}
-				idx := i * cols_b + j
-				ptr := w.res_data + idx
-				*ptr = sum
+				for j < cols_b {
+					ptr_res[j] += val_a * ptr_b[j]
+					j++
+				}
 			}
 		}
 	}
 }
 
-@[inline]
-fn activate(x f64, act ActivationType) f64 {
-	match act {
-		.sigmoid { return 1.0 / (1.0 + math.exp(-x)) }
-		.relu { return if _likely_(x > 0) { x } else { 0.0 } }
-		.tanh { return math.tanh(x) }
-		.linear { return x }
-	}
-}
-
-@[inline]
-fn activate_derivative(activated_val f64, act ActivationType) f64 {
-	match act {
-		.sigmoid { return activated_val * (1.0 - activated_val) }
-		.relu { return if _likely_(activated_val > 0) { 1.0 } else { 0.0 } }
-		.tanh { return 1.0 - (activated_val * activated_val) }
-		.linear { return 1.0 }
+@[inline; unsafe]
+fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
+	unsafe {
+		cols_a := a.cols
+		cols_b := b.cols
+		if cols_b == 1 {
+			mut ptr_res := &res.data[0]
+			mut ptr_a := &a.data[0]
+			ptr_b_start := &b.data[0]
+			for _ in 0 .. a.rows {
+				mut sum := Real(0.0)
+				mut ptr_b := ptr_b_start
+				mut k := 0
+				for k < cols_a - 3 {
+					sum += ptr_a[k] * ptr_b[k]
+					sum += ptr_a[k+1] * ptr_b[k+1]
+					sum += ptr_a[k+2] * ptr_b[k+2]
+					sum += ptr_a[k+3] * ptr_b[k+3]
+					k += 4
+				}
+				for k < cols_a {
+					sum += ptr_a[k] * ptr_b[k]
+					k++
+				}
+				*ptr_res += sum
+				ptr_res++
+				ptr_a += cols_a
+			}
+			return
+		}
+		
+		for i in 0 .. a.rows {
+			offset_res := i * cols_b
+			offset_a := i * cols_a
+			for k in 0 .. cols_a {
+				val_a := a.data[offset_a + k]
+				offset_b := k * cols_b
+				mut ptr_res := &res.data[offset_res]
+				mut ptr_b := &b.data[offset_b]
+				
+				mut j := 0
+				for j < cols_b - 3 {
+					ptr_res[j] += val_a * ptr_b[j]
+					ptr_res[j+1] += val_a * ptr_b[j+1]
+					ptr_res[j+2] += val_a * ptr_b[j+2]
+					ptr_res[j+3] += val_a * ptr_b[j+3]
+					j += 4
+				}
+				for j < cols_b {
+					ptr_res[j] += val_a * ptr_b[j]
+					j++
+				}
+			}
+		}
 	}
 }
 
@@ -299,9 +451,9 @@ pub mut:
 	v_w             Matrix
 	m_b             Matrix
 	v_b             Matrix
-	beta1_t         f64
-	beta2_t         f64
-	dropout_rate    f64
+	beta1_t         Real
+	beta2_t         Real
+	dropout_rate    Real
 	is_rnn          bool
 	hidden_weights  Matrix
 	prev_hidden     Matrix
@@ -327,8 +479,8 @@ pub mut:
 	layers    []Layer
 	optimizer OptimizerType
 	normalize bool = true
-	means     []f64
-	stds      []f64
+	means     []Real
+	stds      []Real
 }
 
 pub fn (mut nn NeuralNetwork) free() {
@@ -356,7 +508,7 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 	}
 }
 
-pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate f64, is_rnn bool) {
+pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate Real, is_rnn bool) {
 	s.net.layers << Layer{
 		weights: new_random_matrix(output_size, input_size)
 		biases: new_random_matrix(output_size, 1)
@@ -369,8 +521,8 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 		v_w: new_matrix(output_size, input_size)
 		m_b: new_matrix(output_size, 1)
 		v_b: new_matrix(output_size, 1)
-		beta1_t: 1.0
-		beta2_t: 1.0
+		beta1_t: Real(1.0)
+		beta2_t: Real(1.0)
 		dropout_rate: dropout_rate
 		is_rnn: is_rnn
 		hidden_weights: if is_rnn { new_random_matrix(output_size, output_size) } else { new_matrix(1, 1) }
@@ -416,8 +568,8 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 		if nn.stds.len > 0 { nn.stds.free() }
 	}
 
-	nn.means = []f64{len: feat_size, init: 0.0}
-	nn.stds = []f64{len: feat_size, init: 0.0}
+	nn.means = []Real{len: feat_size, init: Real(0.0)}
+	nn.stds = []Real{len: feat_size, init: Real(0.0)}
 
 	unsafe {
 		mut ptr_mean_start := &nn.means[0]
@@ -437,7 +589,7 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 			}
 		}
 
-		inv_m := 1.0 / f64(inputs.len)
+		inv_m := Real(1.0) / Real(inputs.len)
 		ptr_m = ptr_mean_start
 		for _ in 0 .. feat_size {
 			*ptr_m *= inv_m
@@ -458,9 +610,9 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 		}
 
 		ptr_s = ptr_std_start
-		eps := 1e-8
+		eps := Real(1e-8)
 		for _ in 0 .. feat_size {
-			*ptr_s = math.sqrt(*ptr_s * inv_m) + eps
+			*ptr_s = fast_sqrt(*ptr_s * inv_m) + eps
 			ptr_s++
 		}
 	}
@@ -474,14 +626,14 @@ pub fn (mut s Sequential) predict(input Tensor) !Tensor {
 }
 
 @[manualfree]
-pub fn (mut s Sequential) train(inputs []Tensor, targets []Tensor, epochs int, lr f64) ! {
+pub fn (mut s Sequential) train(inputs []Tensor, targets []Tensor, epochs int, lr Real) ! {
 	unsafe {
-		s.net.train_with_decay(inputs, targets, epochs, lr, 1.0, 0)!
+		s.net.train_with_decay(inputs, targets, epochs, lr, Real(1.0), 0)!
 	}
 }
 
 @[manualfree]
-pub fn (mut s Sequential) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr f64, decay_rate f64, decay_steps int) ! {
+pub fn (mut s Sequential) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr Real, decay_rate Real, decay_steps int) ! {
 	unsafe {
 		s.net.train_with_decay(inputs, targets, epochs, lr, decay_rate, decay_steps)!
 	}
@@ -493,91 +645,101 @@ pub fn (mut nn NeuralNetwork) predict(input Tensor) !Tensor {
 }
 
 @[manualfree; unsafe]
-fn (mut nn NeuralNetwork) predict_internal(input Tensor, perform_normalization bool) !Tensor {
+fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool) ! {
 	$if vnm_safe ? {
 		if nn.layers.len == 0 {
-			return error("Prediction failed: NeuralNetwork has no layers.")
+			return error("Forward pass failed: NeuralNetwork has no layers.")
 		}
 		first_layer_input_size := nn.layers[0].weights.cols
 		if input.data.len != first_layer_input_size {
 			return error("Dimension mismatch: Input size is ${input.data.len}, but network expects ${first_layer_input_size}.")
 		}
-		vnm_log("Input dimension verified: ${input.data.len}")
 	}
 
-	mut input_data := input.data
+	unsafe {
+		mut first_layer := &nn.layers[0]
 
-	if perform_normalization && nn.normalize && nn.means.len > 0 {
-		input_data = input.data.clone()
-		unsafe {
-			mut ptr_data := &input_data[0]
+		if perform_normalization && nn.normalize && nn.means.len > 0 {
+			mut ptr_dest := &first_layer.last_input.data[0]
+			mut ptr_src := &input.data[0]
 			mut ptr_mean := &nn.means[0]
 			mut ptr_std := &nn.stds[0]
-			for _ in 0 .. input_data.len {
-				*ptr_data = (*ptr_data - *ptr_mean) / *ptr_std
-				ptr_data++
+			for _ in 0 .. input.data.len {
+				*ptr_dest = (*ptr_src - *ptr_mean) / *ptr_std
+				ptr_dest++
+				ptr_src++
 				ptr_mean++
 				ptr_std++
 			}
+		} else {
+			copy_real(&first_layer.last_input.data[0], &input.data[0], input.data.len)
 		}
-	}
 
-	mut current := Matrix{
-		rows: input_data.len
-		cols: 1
-		data: input_data
-	}
-
-	for mut layer in nn.layers {
-		layer.last_input = current
-		mut raw_output := matmul_parallel(layer.weights, current)!
-		
-		if layer.is_rnn {
-			mut recur := matmul_parallel(layer.hidden_weights, layer.prev_hidden)!
-			unsafe {
-				mut ptr_res := &raw_output.data[0]
-				mut ptr_rec := &recur.data[0]
-				for _ in 0 .. raw_output.data.len {
-					*ptr_res += *ptr_rec
-					ptr_res++
-					ptr_rec++
+		for l in 0 .. nn.layers.len {
+			mut layer := &nn.layers[l]
+			
+			if l > 0 {
+				prev_layer := &nn.layers[l - 1]
+				copy_real(&layer.last_input.data[0], &prev_layer.last_output.data[0], layer.last_input.data.len)
+			}
+			
+			matmul_inplace(layer.weights, layer.last_input, mut layer.last_output)
+			
+			if layer.is_rnn {
+				matmul_add_inplace(layer.hidden_weights, layer.prev_hidden, mut layer.last_output)
+			}
+			
+			mut ptr_res := &layer.last_output.data[0]
+			mut ptr_bias := &layer.biases.data[0]
+			len := layer.last_output.data.len
+			
+			match layer.activation_type {
+				.sigmoid {
+					for i in 0 .. len {
+						val := ptr_res[i] + ptr_bias[i]
+						ptr_res[i] = fast_sigmoid(val)
+					}
+				}
+				.relu {
+					for i in 0 .. len {
+						val := ptr_res[i] + ptr_bias[i]
+						ptr_res[i] = if val > Real(0.0) { val } else { Real(0.0) }
+					}
+				}
+				.tanh {
+					for i in 0 .. len {
+						val := ptr_res[i] + ptr_bias[i]
+						ptr_res[i] = fast_tanh(val)
+					}
+				}
+				.linear {
+					for i in 0 .. len {
+						ptr_res[i] = ptr_res[i] + ptr_bias[i]
+					}
 				}
 			}
-			recur.free()
-		}
-		
-		unsafe {
-			mut ptr_res := &raw_output.data[0]
-			mut ptr_bias := &layer.biases.data[0]
-			for _ in 0 .. raw_output.data.len {
-				*ptr_res = activate(*ptr_res + *ptr_bias, layer.activation_type)
-				ptr_res++
-				ptr_bias++
+
+			if layer.is_rnn {
+				copy_real(&layer.prev_hidden.data[0], &layer.last_output.data[0], layer.last_output.data.len)
 			}
 		}
+	}
+}
 
-		if layer.is_rnn {
-			layer.prev_hidden.free()
-			layer.prev_hidden = raw_output.clone()
+@[manualfree; unsafe]
+fn (mut nn NeuralNetwork) predict_internal(input Tensor, perform_normalization bool) !Tensor {
+	unsafe {
+		nn.forward_pass(input, perform_normalization)!
+		last_layer := &nn.layers[nn.layers.len - 1]
+		return Tensor{
+			shape: [last_layer.last_output.data.len]
+			data: last_layer.last_output.data.clone()
 		}
-
-		layer.last_output = raw_output
-		current = raw_output
-	}
-	
-	return Tensor{
-		shape: [current.data.len]
-		data: current.data
 	}
 }
 
 @[manualfree; unsafe]
-pub fn (mut nn NeuralNetwork) train_step(input Tensor, target Tensor, lr f64) !Tensor {
-	return nn.train_step_internal(input, target, lr, false)!
-}
-
-@[manualfree; unsafe]
-fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr f64, is_normalized bool) !Tensor {
+fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Real, is_normalized bool) !Real {
 	$if vnm_safe ? {
 		if nn.layers.len == 0 {
 			return error("Training failed: NeuralNetwork has no layers.")
@@ -587,131 +749,158 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr f6
 		if target.data.len != expected_output_size {
 			return error("Dimension mismatch: Target size is ${target.data.len}, but network outputs ${expected_output_size}.")
 		}
-		vnm_log("Target dimension verified: ${target.data.len}")
 	}
 
-	output_tensor := nn.predict_internal(input, !is_normalized)!
-
-	mut output_layer := &nn.layers[nn.layers.len - 1]
-	mut delta := new_matrix(output_layer.last_output.rows, 1)
-	
 	unsafe {
-		mut ptr_delta := &delta.data[0]
+		nn.forward_pass(input, !is_normalized)!
+
+		mut output_layer := &nn.layers[nn.layers.len - 1]
+		mut step_loss := Real(0.0)
+		
+		mut ptr_delta := &output_layer.delta.data[0]
 		mut ptr_out := &output_layer.last_output.data[0]
 		mut ptr_target := &target.data[0]
-		for _ in 0 .. delta.data.len {
-			error_val := *ptr_out - *ptr_target
-			*ptr_delta = error_val * activate_derivative(*ptr_out, output_layer.activation_type)
-			ptr_delta++
-			ptr_out++
-			ptr_target++
-		}
-	}
-
-	for l := nn.layers.len - 1; l >= 0; l-- {
-		mut current_layer := &nn.layers[l]
+		len := output_layer.delta.data.len
 		
-		matmul_transpose_b_inplace(delta, current_layer.last_input, mut current_layer.grad_w)
-
-		mut next_delta := new_matrix(1, 1)
-		if _likely_(l > 0) {
-			prev_layer := &nn.layers[l - 1]
-			next_delta = new_matrix(prev_layer.last_output.rows, 1)
-			
-			matmul_transpose_a_inplace(current_layer.weights, delta, mut next_delta)
-			
-			unsafe {
-				mut ptr_next := &next_delta.data[0]
-				mut ptr_prev_out := &prev_layer.last_output.data[0]
-				for _ in 0 .. next_delta.data.len {
-					*ptr_next = *ptr_next * activate_derivative(*ptr_prev_out, prev_layer.activation_type)
-					ptr_next++
-					ptr_prev_out++
+		match output_layer.activation_type {
+			.sigmoid {
+				for i in 0 .. len {
+					error_val := ptr_out[i] - ptr_target[i]
+					step_loss += error_val * error_val
+					ptr_delta[i] = error_val * (ptr_out[i] * (Real(1.0) - ptr_out[i]))
+				}
+			}
+			.relu {
+				for i in 0 .. len {
+					error_val := ptr_out[i] - ptr_target[i]
+					step_loss += error_val * error_val
+					ptr_delta[i] = if ptr_out[i] > Real(0.0) { error_val } else { Real(0.0) }
+				}
+			}
+			.tanh {
+				for i in 0 .. len {
+					error_val := ptr_out[i] - ptr_target[i]
+					step_loss += error_val * error_val
+					ptr_delta[i] = error_val * (Real(1.0) - (ptr_out[i] * ptr_out[i]))
+				}
+			}
+			.linear {
+				for i in 0 .. len {
+					error_val := ptr_out[i] - ptr_target[i]
+					step_loss += error_val * error_val
+					ptr_delta[i] = error_val
 				}
 			}
 		}
 
-		if _likely_(nn.optimizer == .adam) {
-			beta1 := 0.9
-			beta2 := 0.999
-			eps := 1e-8
+		for l := nn.layers.len - 1; l >= 0; l-- {
+			mut current_layer := &nn.layers[l]
+			
+			matmul_transpose_b_inplace(current_layer.delta, current_layer.last_input, mut current_layer.grad_w)
 
-			current_layer.beta1_t *= beta1
-			current_layer.beta2_t *= beta2
+			if l > 0 {
+				mut prev_layer := &nn.layers[l - 1]
+				
+				matmul_transpose_a_inplace(current_layer.weights, current_layer.delta, mut prev_layer.delta)
+				
+				mut ptr_next := &prev_layer.delta.data[0]
+				mut ptr_prev_out := &prev_layer.last_output.data[0]
+				len_prev := prev_layer.delta.data.len
+				
+				match prev_layer.activation_type {
+					.sigmoid {
+						for i in 0 .. len_prev {
+							ptr_next[i] = ptr_next[i] * (ptr_prev_out[i] * (Real(1.0) - ptr_prev_out[i]))
+						}
+					}
+					.relu {
+						for i in 0 .. len_prev {
+							ptr_next[i] = if ptr_prev_out[i] > Real(0.0) { ptr_next[i] } else { Real(0.0) }
+						}
+					}
+					.tanh {
+						for i in 0 .. len_prev {
+							ptr_next[i] = ptr_next[i] * (Real(1.0) - (ptr_prev_out[i] * ptr_prev_out[i]))
+						}
+					}
+					.linear {}
+				}
+			}
 
-			bias_correction1 := 1.0 - current_layer.beta1_t
-			bias_correction2 := 1.0 - current_layer.beta2_t
+			if _likely_(nn.optimizer == .adam) {
+				beta1 := Real(0.9)
+				beta2 := Real(0.999)
+				
+				eps_sq := Real(1e-12)
 
-			unsafe {
+				current_layer.beta1_t *= beta1
+				current_layer.beta2_t *= beta2
+
+				bias_correction1 := Real(1.0) - current_layer.beta1_t
+				bias_correction2 := Real(1.0) - current_layer.beta2_t
+
 				mut ptr_w := &current_layer.weights.data[0]
 				mut ptr_g := &current_layer.grad_w.data[0]
 				mut ptr_mw := &current_layer.m_w.data[0]
 				mut ptr_vw := &current_layer.v_w.data[0]
 				
-				for _ in 0 .. current_layer.weights.data.len {
-					*ptr_mw = beta1 * *ptr_mw + (1.0 - beta1) * *ptr_g
-					*ptr_vw = beta2 * *ptr_vw + (1.0 - beta2) * *ptr_g * *ptr_g
-
-					m_hat := *ptr_mw / bias_correction1
-					v_hat := *ptr_vw / bias_correction2
-
-					*ptr_w -= lr * m_hat / (math.sqrt(v_hat) + eps)
-					ptr_w++
-					ptr_g++
-					ptr_mw++
-					ptr_vw++
+				one_minus_beta1 := Real(1.0) - beta1
+				one_minus_beta2 := Real(1.0) - beta2
+				
+				step_size := lr / bias_correction1
+				inv_bias_corr2 := Real(1.0) / bias_correction2
+				
+				len_w := current_layer.weights.data.len
+				
+				for i in 0 .. len_w {
+					mw_val := beta1 * ptr_mw[i] + one_minus_beta1 * ptr_g[i]
+					vw_val := beta2 * ptr_vw[i] + one_minus_beta2 * ptr_g[i] * ptr_g[i]
+					
+					ptr_mw[i] = mw_val
+					ptr_vw[i] = vw_val
+					
+					v_hat := vw_val * inv_bias_corr2
+					ptr_w[i] -= step_size * mw_val * fast_inv_sqrt(v_hat + eps_sq)
 				}
 
 				mut ptr_b := &current_layer.biases.data[0]
-				mut ptr_d := &delta.data[0]
+				mut ptr_d := &current_layer.delta.data[0]
 				mut ptr_mb := &current_layer.m_b.data[0]
 				mut ptr_vb := &current_layer.v_b.data[0]
 
-				for _ in 0 .. current_layer.biases.data.len {
-					*ptr_mb = beta1 * *ptr_mb + (1.0 - beta1) * *ptr_d
-					*ptr_vb = beta2 * *ptr_vb + (1.0 - beta2) * *ptr_d * *ptr_d
-
-					m_hat := *ptr_mb / bias_correction1
-					v_hat := *ptr_vb / bias_correction2
-
-					*ptr_b -= lr * m_hat / (math.sqrt(v_hat) + eps)
-					ptr_b++
-					ptr_d++
-					ptr_mb++
-					ptr_vb++
+				len_b := current_layer.biases.data.len
+				for i in 0 .. len_b {
+					mb_val := beta1 * ptr_mb[i] + one_minus_beta1 * ptr_d[i]
+					vb_val := beta2 * ptr_vb[i] + one_minus_beta2 * ptr_d[i] * ptr_d[i]
+					
+					ptr_mb[i] = mb_val
+					ptr_vb[i] = vb_val
+					
+					v_hat_b := vb_val * inv_bias_corr2
+					ptr_b[i] -= step_size * mb_val * fast_inv_sqrt(v_hat_b + eps_sq)
 				}
-			}
-		} else {
-			unsafe {
+			} else {
 				mut ptr_w := &current_layer.weights.data[0]
 				mut ptr_g := &current_layer.grad_w.data[0]
-				for _ in 0 .. current_layer.weights.data.len {
-					*ptr_w -= lr * *ptr_g
-					ptr_w++
-					ptr_g++
+				len_w := current_layer.weights.data.len
+				for i in 0 .. len_w {
+					ptr_w[i] -= lr * ptr_g[i]
 				}
 				
 				mut ptr_b := &current_layer.biases.data[0]
-				mut ptr_d := &delta.data[0]
-				for _ in 0 .. current_layer.biases.data.len {
-					*ptr_b -= lr * *ptr_d
-					ptr_b++
-					ptr_d++
+				mut ptr_d := &current_layer.delta.data[0]
+				len_b := current_layer.biases.data.len
+				for i in 0 .. len_b {
+					ptr_b[i] -= lr * ptr_d[i]
 				}
 			}
 		}
-
-		delta.free()
-		delta = next_delta
+		return step_loss
 	}
-	
-	delta.free()
-	return output_tensor
 }
 
 @[manualfree; unsafe]
-pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr f64, decay_rate f64, decay_steps int) ! {
-	last_layer_idx := nn.layers.len - 1
+pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr Real, decay_rate Real, decay_steps int) ! {
 	mut current_lr := lr
 
 	mut training_inputs := inputs
@@ -742,29 +931,18 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 	}
 
 	for epoch in 0 .. epochs {
-		if _unlikely_(decay_rate < 1.0 && decay_steps > 0 && epoch > 0 && epoch % decay_steps == 0) {
+		if _unlikely_(decay_rate < Real(1.0) && decay_steps > 0 && epoch > 0 && epoch % decay_steps == 0) {
 			current_lr *= decay_rate
 		}
 
-		mut total_error := 0.0
+		mut total_error := Real(0.0)
 		for i in 0 .. training_inputs.len {
-			out := nn.train_step_internal(training_inputs[i], targets[i], current_lr, true)!
-			unsafe {
-				last_layer_output := nn.layers[last_layer_idx].last_output.data
-				mut ptr_out := &last_layer_output[0]
-				mut ptr_target := &targets[i].data[0]
-				for _ in 0 .. last_layer_output.len {
-					diff := *ptr_out - *ptr_target
-					total_error += diff * diff
-					ptr_out++
-					ptr_target++
-				}
-			}
-			out.free()
+			step_loss := nn.train_step_internal(training_inputs[i], targets[i], current_lr, true)!
+			total_error += step_loss
 		}
 		
 		if epochs >= 10 && epoch % (epochs / 10) == 0 {
-			mean_error := total_error / f64(inputs.len)
+			mean_error := total_error / Real(inputs.len)
 			println("  Epoch ${epoch:5d} / ${epochs} | Active LR: ${current_lr:.6f} | Mean Squared Loss: ${mean_error:.8f}")
 		}
 	}
