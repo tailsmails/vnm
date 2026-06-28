@@ -35,37 +35,6 @@ fn to_real_array(data []f64) []Real {
 
 $if vnm_f64 ? {
 	@[inline]
-	fn fast_exp(x Real) Real {
-		if x < -700.0 { return Real(0.0) }
-		if x > 700.0 { return Real(1.7976931348623157e+308) }
-		
-		val_f := 6497334751787128.0 * x + 4607063855013146400.0
-		val_u := u64(val_f)
-		mut res := Real(0.0)
-		unsafe {
-			C.memcpy(&res, &val_u, sizeof(Real))
-		}
-		return res
-	}
-	
-	@[inline]
-	fn fast_inv_sqrt(x Real) Real {
-		mut xhalf := Real(0.5) * x
-		mut i := u64(0)
-		unsafe {
-			C.memcpy(&i, &x, sizeof(Real))
-		}
-		i = 0x5fe6eb50c7b537a9 - (i >> 1)
-		mut y := Real(0.0)
-		unsafe {
-			C.memcpy(&y, &i, sizeof(Real))
-		}
-		y = y * (Real(1.5) - xhalf * y * y)
-		y = y * (Real(1.5) - xhalf * y * y)
-		return y
-	}
-
-	@[inline]
 	fn fast_sqrt(x Real) Real {
 		return math.sqrt(x)
 	}
@@ -73,52 +42,131 @@ $if vnm_f64 ? {
 	fn C.sqrtf(x f32) f32
 
 	@[inline]
-	fn fast_exp(x Real) Real {
-		if x < -88.0 { return Real(0.0) }
-		if x > 88.0 { return Real(3.40282347e+38) }
-		
-		val_f := 12102203.0 * x + 1064866816.0
-		val_u := u32(val_f)
-		mut res := Real(0.0)
-		unsafe {
-			C.memcpy(&res, &val_u, sizeof(Real))
-		}
-		return res
-	}
-	
-	@[inline]
-	fn fast_inv_sqrt(x Real) Real {
-		mut xhalf := Real(0.5) * x
-		mut i := u32(0)
-		unsafe {
-			C.memcpy(&i, &x, sizeof(Real))
-		}
-		i = 0x5f3759df - (i >> 1)
-		mut y := Real(0.0)
-		unsafe {
-			C.memcpy(&y, &i, sizeof(Real))
-		}
-		y = y * (Real(1.5) - xhalf * y * y)
-		return y
-	}
-
-	@[inline]
 	fn fast_sqrt(x Real) Real {
 		return C.sqrtf(x)
 	}
 }
 
-@[inline]
-fn fast_sigmoid(x Real) Real {
-	return Real(1.0) / (Real(1.0) + fast_exp(-x))
+pub enum ApproxLevel {
+	precise
+	balanced
+	fast
+	extreme
 }
 
 @[inline]
-fn fast_tanh(x Real) Real {
-	if x < Real(-5.0) { return Real(-1.0) }
-	if x > Real(5.0) { return Real(1.0) }
-	ex2 := fast_exp(Real(2.0) * x)
-	return (ex2 - Real(1.0)) / (ex2 + Real(1.0))
+fn approx_sigmoid(x Real, level ApproxLevel) Real {
+	match level {
+		.precise {
+			return Real(1.0) / (Real(1.0) + Real(math.exp(f64(-x))))
+		}
+		.balanced {
+			return Real(0.5) + Real(0.5) * approx_tanh(Real(0.5) * x, .balanced)
+		}
+		.fast {
+			abs_x := if x < Real(0.0) { -x } else { x }
+			return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
+		}
+		.extreme {
+			val := Real(0.2) * x + Real(0.5)
+			if val < Real(0.0) { return Real(0.0) }
+			if val > Real(1.0) { return Real(1.0) }
+			return val
+		}
+	}
+}
+
+@[inline]
+fn approx_tanh(x Real, level ApproxLevel) Real {
+	match level {
+		.precise {
+			return Real(math.tanh(f64(x)))
+		}
+		.balanced {
+			if x < Real(-3.0) { return Real(-1.0) }
+			if x > Real(3.0) { return Real(1.0) }
+			return x * (Real(27.0) + x * x) / (Real(27.0) + Real(9.0) * x * x)
+		}
+		.fast {
+			abs_x := if x < Real(0.0) { -x } else { x }
+			return x / (Real(1.0) + abs_x)
+		}
+		.extreme {
+			if x < Real(-1.0) { return Real(-1.0) }
+			if x > Real(1.0) { return Real(1.0) }
+			return x
+		}
+	}
+}
+
+@[inline]
+fn approx_inv_sqrt(x Real, level ApproxLevel) Real {
+	match level {
+		.precise {
+			return Real(1.0) / Real(math.sqrt(f64(x)))
+		}
+		.balanced {
+			$if vnm_f64 ? {
+				mut xhalf := Real(0.5) * x
+				mut i := u64(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5fe6eb50c7b537a9 - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				y = y * (Real(1.5) - xhalf * y * y)
+				y = y * (Real(1.5) - xhalf * y * y)
+				return y
+			} $else {
+				mut xhalf := Real(0.5) * x
+				mut i := u32(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5f3759df - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				y = y * (Real(1.5) - xhalf * y * y)
+				y = y * (Real(1.5) - xhalf * y * y)
+				return y
+			}
+		}
+		.fast {
+			$if vnm_f64 ? {
+				mut xhalf := Real(0.5) * x
+				mut i := u64(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5fe6eb50c7b537a9 - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				y = y * (Real(1.5) - xhalf * y * y)
+				return y
+			} $else {
+				mut xhalf := Real(0.5) * x
+				mut i := u32(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5f3759df - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				y = y * (Real(1.5) - xhalf * y * y)
+				return y
+			}
+		}
+		.extreme {
+			$if vnm_f64 ? {
+				mut i := u64(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5fe6eb50c7b537a9 - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				return y
+			} $else {
+				mut i := u32(0)
+				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+				i = 0x5f3759df - (i >> 1)
+				mut y := Real(0.0)
+				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+				return y
+			}
+		}
+	}
 }
 
 pub enum ActivationType {
@@ -546,11 +594,12 @@ pub fn (mut l Layer) free() {
 
 pub struct NeuralNetwork {
 pub mut:
-	layers    []Layer
-	optimizer OptimizerType
-	normalize bool = true
-	means     []Real
-	stds      []Real
+	layers        []Layer
+	optimizer     OptimizerType
+	normalize     bool = true
+	approx_level  ApproxLevel = .fast
+	means         []Real
+	stds          []Real
 }
 
 pub fn (mut nn NeuralNetwork) free() {
@@ -574,6 +623,7 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 		net: NeuralNetwork{
 			optimizer: optimizer
 			normalize: true
+			approx_level: .fast
 		}
 	}
 }
@@ -602,6 +652,10 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 
 pub fn (mut s Sequential) set_normalize(val bool) {
 	s.net.normalize = val
+}
+
+pub fn (mut s Sequential) set_approx_level(level ApproxLevel) {
+	s.net.approx_level = level
 }
 
 pub fn (mut s Sequential) free() {
@@ -767,7 +821,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.sigmoid {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = fast_sigmoid(val)
+						ptr_res[i] = approx_sigmoid(val, nn.approx_level)
 					}
 				}
 				.relu {
@@ -779,7 +833,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.tanh {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = fast_tanh(val)
+						ptr_res[i] = approx_tanh(val, nn.approx_level)
 					}
 				}
 				.linear {
@@ -817,7 +871,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 		last_layer_idx := nn.layers.len - 1
 		expected_output_size := nn.layers[last_layer_idx].weights.rows
 		if target.data.len != expected_output_size {
-			return error("Dimension mismatch: Target size is ${target.data.len}, but network outputs ${expected_output_size}.")
+			return error("Dimension mismatch: Target size is ${target.data.len}, but network expects ${expected_output_size}.")
 		}
 	}
 
@@ -930,7 +984,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 					ptr_vw[i] = vw_val
 					
 					v_hat := vw_val * inv_bias_corr2
-					ptr_w[i] -= step_size * mw_val * fast_inv_sqrt(v_hat + eps_sq)
+					ptr_w[i] -= step_size * mw_val * approx_inv_sqrt(v_hat + eps_sq, nn.approx_level)
 				}
 
 				mut ptr_b := &current_layer.biases.data[0]
@@ -947,7 +1001,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 					ptr_vb[i] = vb_val
 					
 					v_hat_b := vb_val * inv_bias_corr2
-					ptr_b[i] -= step_size * mb_val * fast_inv_sqrt(v_hat_b + eps_sq)
+					ptr_b[i] -= step_size * mb_val * approx_inv_sqrt(v_hat_b + eps_sq, nn.approx_level)
 				}
 			} else {
 				mut ptr_w := &current_layer.weights.data[0]
