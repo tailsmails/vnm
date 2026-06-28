@@ -48,9 +48,9 @@ $if vnm_f64 ? {
 }
 
 pub enum ApproxLevel {
+	fast
 	precise
 	balanced
-	fast
 	extreme
 }
 
