@@ -126,6 +126,14 @@ pub fn (m Matrix) transpose() Matrix {
 	return res
 }
 
+pub fn (m Matrix) clone() Matrix {
+	return Matrix{
+		rows: m.rows
+		cols: m.cols
+		data: m.data.clone()
+	}
+}
+
 pub fn (m &Matrix) free() {
 	unsafe { m.data.free() }
 }
@@ -293,6 +301,10 @@ pub mut:
 	v_b             Matrix
 	beta1_t         f64
 	beta2_t         f64
+	dropout_rate    f64
+	is_rnn          bool
+	hidden_weights  Matrix
+	prev_hidden     Matrix
 }
 
 pub fn (mut l Layer) free() {
@@ -306,6 +318,8 @@ pub fn (mut l Layer) free() {
 	l.v_w.free()
 	l.m_b.free()
 	l.v_b.free()
+	l.hidden_weights.free()
+	l.prev_hidden.free()
 }
 
 pub struct NeuralNetwork {
@@ -342,7 +356,7 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 	}
 }
 
-pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType) {
+pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate f64, is_rnn bool) {
 	s.net.layers << Layer{
 		weights: new_random_matrix(output_size, input_size)
 		biases: new_random_matrix(output_size, 1)
@@ -357,6 +371,10 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 		v_b: new_matrix(output_size, 1)
 		beta1_t: 1.0
 		beta2_t: 1.0
+		dropout_rate: dropout_rate
+		is_rnn: is_rnn
+		hidden_weights: if is_rnn { new_random_matrix(output_size, output_size) } else { new_matrix(1, 1) }
+		prev_hidden: if is_rnn { new_matrix(output_size, 1) } else { new_matrix(1, 1) }
 	}
 }
 
@@ -514,6 +532,20 @@ fn (mut nn NeuralNetwork) predict_internal(input Tensor, perform_normalization b
 		layer.last_input = current
 		mut raw_output := matmul_parallel(layer.weights, current)!
 		
+		if layer.is_rnn {
+			mut recur := matmul_parallel(layer.hidden_weights, layer.prev_hidden)!
+			unsafe {
+				mut ptr_res := &raw_output.data[0]
+				mut ptr_rec := &recur.data[0]
+				for _ in 0 .. raw_output.data.len {
+					*ptr_res += *ptr_rec
+					ptr_res++
+					ptr_rec++
+				}
+			}
+			recur.free()
+		}
+		
 		unsafe {
 			mut ptr_res := &raw_output.data[0]
 			mut ptr_bias := &layer.biases.data[0]
@@ -523,6 +555,12 @@ fn (mut nn NeuralNetwork) predict_internal(input Tensor, perform_normalization b
 				ptr_bias++
 			}
 		}
+
+		if layer.is_rnn {
+			layer.prev_hidden.free()
+			layer.prev_hidden = raw_output.clone()
+		}
+
 		layer.last_output = raw_output
 		current = raw_output
 	}
