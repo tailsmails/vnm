@@ -1,36 +1,31 @@
 # vnm
 
 ## Overview
-`vnm` is a highly lightweight, compiled neural network library written in pure V. It is designed for multi-variable regression and classification tasks, specifically optimized for high-throughput, low-latency execution strictly on CPU architectures. It is ideal for resource-constrained micro-architectures, mobile environments (such as Termux), and high-performance desktop platforms.
+`vnm` is an extremely lightweight, compiled neural network library written in pure V. It is designed for multi-variable regression and classification tasks, optimized for low-latency execution on resource-constrained micro-architectures, mobile environments (such as Termux), and high-performance desktop platforms.
 
-By bypassing automatic garbage collection, avoiding large frameworks, and utilizing explicit manual memory management, `vnm` compiles directly to native C. It is built to run exclusively on CPU cores (x86 and ARM), making machine learning accessible and highly efficient without requiring heavy GPU drivers or CUDA/ROCm dependencies.
+By bypassing automatic garbage collection and utilizing explicit manual memory management, `vnm` compiles directly to native C. This approach minimizes runtime engine overhead, enabling high-throughput training and inference directly on standard CPU cores.
 
 ---
 
 ## Key Features
 
-*   **Dynamic Multi-Threaded Execution:** Features dynamic thread dispatching using V's native `spawn` keyword. It queries physical CPU cores via `runtime.nr_cpus()` and divides row-wise matrix multiplications among multiple threads without locking or data races, scaling CPU performance on multi-core processors.
+*   **Dynamic Multi-Threaded Execution:** Features dynamic thread dispatching using V's native `spawn` keyword. It queries physical CPU cores via `runtime.nr_cpus()` and divides row-wise matrix multiplications among multiple threads without locking or data races, scaling performance on multi-core processors.
 *   **Smart Fallback Thresholds:** Prevents scheduling and context-switching overhead on smaller workloads. The library dynamically routes execution to an optimized single-threaded path if the matrix has fewer than 64 rows, or during single-vector calculations (where `cols_b == 1`).
 *   **Advanced Optimizers (SGD & Adam):** Built-in support for both standard Stochastic Gradient Descent (SGD) and the highly efficient **Adam** optimizer. It features momentum, velocity, and bias correction (`beta1`, `beta2`) for rapid and stable convergence.
-*   **True Zero-Allocation Training:** Bypasses garbage collection and manual allocator (`malloc`/`free`) overhead. Once initialized, the entire forward pass, backpropagation, and Adam weight update pipeline runs with **exactly zero** dynamic memory allocations, keeping all active data inside pre-allocated cache buffers on the CPU heap.
-*   **Multi-Graded Math Approximations:** Provides a flexible, four-tiered architecture for mathematical functions to balance execution speed against gradient precision:
-    *   **Precise (Grade 0):** Employs exact IEEE 754 standard CPU math (`math.exp`, `math.tanh`, and standard square root) for high accuracy.
-    *   **Balanced (Grade 1):** Utilizes highly accurate Padé rational approximations for activation functions and a 2-iteration fast inverse square root for the optimizer.
-    *   **Fast (Grade 2):** Uses the branchless Elliott algebraic approximation ($y = \frac{x}{1+|x|}$) which eliminates slow exponentials, prevents CPU pipeline stalls, and accelerates training via 1-iteration fast inverse square root.
-    *   **Extreme (Grade 3):** Replaces activations with piecewise linear/hard representations (Hard-Sigmoid, Hard-Tanh) and uses raw 0-iteration bit-hack inverse square root for maximum raw CPU throughput.
-*   **Quake III Fast Inverse Square Root:** Replaces heavy hardware division and square root operations inside the Adam updates. Employing a modified version of the fast inverse square root bit-hack (optimized for both `f32` and `f64` precision), Adam updates are converted into rapid, low-cycle multiplications.
-*   **Branchless Activation Functions (ReLU):** To prevent CPU pipeline stalls caused by branch mispredictions, ReLU and its derivatives are written in a completely branchless manner using floating-point bitwise absolute values and sign copies.
+*   **True Zero-Allocation Training:** Bypasses garbage collection and manual allocator (`malloc`/`free`) overhead. Once initialized, the entire forward pass, backpropagation, and Adam weight update pipeline runs with **exactly zero** dynamic memory allocations, maintaining all active data inside pre-allocated cache buffers.
+*   **Quake III Fast Inverse Square Root:** Replaces the heavy hardware square root (`C.sqrtf`/`math.sqrt`) and division operations inside the innermost Adam updates. By employing the legendary fast inverse square root bit-hack (optimized for both `f32` and `f64` precision), Adam updates are converted into ultra-fast, low-cycle multiplications.
+*   **Branchless Activation Functions (ReLU):** To prevent CPU pipeline stalls caused by branch mispredictions, ReLU and its derivatives are written in a completely branchless manner using floating-point bitwise absolute values (`fast_abs`) and sign copies (`fast_copysign`).
 *   **V Bounds Checking Bypass:** Bypasses V's implicit array bounds checking inside hot training loops and layer operations. By utilizing unsafe pointer indexing (`&training_inputs[0]`, `&nn.layers[0]`), the compiler translates loops directly into raw, high-performance C pointer arithmetic.
-*   **Loop Fusion:** Evaluates Mean Squared Error (MSE) loss and calculates the output layer's gradient delta ($\delta$) simultaneously in a single fused loop. This reduces CPU cache sweeps and significantly lowers memory bus traffic.
-*   **Flexible Compile-Time Precision (`Real` Alias):** Features dynamic precision mapping. Single-precision `f32` is employed as the default compile-time mode to maximize SSE2/AVX/NEON vectorization throughput and cut memory bandwidth requirements in half. If high precision is required, passing `-d vnm_f64` at compile-time seamlessly promotes the engine to double-precision `f64`.
+*   **Loop Fusion:** Evaluates Mean Squared Error (MSE) loss and calculates the output layer's gradient delta ($\delta$) simultaneously in a single fused loop. This reduces cache sweeps and significantly lowers memory bus traffic.
+*   **Flexible Compile-Time Precision (`Real` Alias):** Features dynamic precision mapping. Single-precision `f32` is employed as the default compile-time mode to maximize SSE2/NEON vectorization throughput and cut memory bandwidth requirements in half. If high precision is required, passing `-d vnm_f64` at compile-time seamlessly promotes the engine to double-precision `f64`.
 *   **Seamless User-Friendly Boundaries:** To preserve clean syntax, creator APIs (`vector`, `scalar`, `new_tensor`) accept standard V float arrays (`[]f64`). The library automatically and internally maps these inputs to the active engine precision (`Real`) during tensor instantiation with negligible overhead.
-*   **RNN & Sequence Modeling Support:** Beyond standard feed-forward networks, `vnm` features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing on CPU cores.
+*   **RNN & Sequence Modeling Support:** Beyond standard feed-forward networks, `vnm` features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing.
 *   **Dropout Regularization:** Includes a highly optimized dropout mechanism with drop masks. It randomly deactivates neurons during the training phase and automatically scales active neurons, effectively preventing overfitting in complex architectures.
 *   **JSON Model Serialization (Save/Load):** Fully trained models—including network topology, weights, biases, and normalization parameters—can be serialized and deserialized to/from disk via standard JSON configuration with zero external dependencies.
 *   **Zero-Configuration Auto-Normalization:** Features built-in Z-Score input standardization and Target Min-Max scaling. The model automatically computes, stores, and serializes feature means, standard deviations, and boundaries during training, applying them seamlessly to future predictions with zero user configuration.
 *   **Compile-Time Conditional Safety (`-d vnm_safe`):** Dual-mode compilation ensures maximum versatility. You can compile with size-validation, dimension mismatch checks, and zero-division assertions during development, or completely prune these assertions at compile-time for absolute zero-overhead execution in production.
 *   **He (Kaiming) Initialization:** Built-in uniform random initialization ($\sqrt{6 / n_{\text{in}}}$) optimized specifically for stable training, preventing gradient explosion and dead neurons.
-*   **Zero-Transpose GEMM via IKJ Layout:** Matrix multiplication implements an optimized IKJ loop order. This naturally accesses both matrix operands contiguously (stride-1), maximizing CPU L1/L2 cache locality, increasing cache hits, and entirely eliminating the need for matrix transposition.
+*   **Zero-Transpose GEMM via IKJ Layout:** Matrix multiplication implements an optimized IKJ loop order. This naturally accesses both matrix operands contiguously (stride-1), entirely eliminating the need for matrix transposition and saving RAM allocation overhead.
 
 ---
 
@@ -101,7 +96,6 @@ fn main() {
 	model.add(2, 8, .relu, 0.0, false)
 	model.add(8, 1, .sigmoid, 0.0, false)
 	model.set_normalize(false)
-	model.set_approx_level(.fast)
 	
 	println('Starting training (1000 epochs)...')
 	sw := time.new_stopwatch()
@@ -173,7 +167,7 @@ v -d vnm_safe -cc clang main.v -o main && ./main
 ```
 
 ### 2. Ultra-Performance Single-Precision (f32) Production Mode (Default)
-Strips away all assertions, logs, and dimension checks at compile-time, maximizing compiler-level loop unrolling and SSE2/AVX/NEON CPU hardware vectorization:
+Strips away all assertions, logs, and dimension checks at compile-time, maximizing compiler-level loop unrolling and SSE2/NEON hardware vectorization:
 ```bash
 v -cc clang -prod -d no_bounds_checking main.v -o main && ./main
 ```
@@ -201,7 +195,7 @@ v -d vnm_f64 -cc clang -prod -d no_bounds_checking main.v -o main && ./main
 ---
 
 ## Disclaimer
-This library is developed for educational purposes, academic research, and edge-computing applications requiring lightweight, dependency-free CPU-only machine learning implementations.
+This library is developed for educational purposes, academic research, and edge-computing applications requiring lightweight, dependency-free machine learning implementations.
 
 ---
 
