@@ -9,6 +9,8 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 
 ## Key Features
 
+*   **Dynamic Multi-Threaded Execution:** Features dynamic thread dispatching using V's native `spawn` keyword. It queries physical CPU cores via `runtime.nr_cpus()` and divides row-wise matrix multiplications among multiple threads without locking or data races, scaling performance on multi-core processors.
+*   **Smart Fallback Thresholds:** Prevents scheduling and context-switching overhead on smaller workloads. The library dynamically routes execution to an optimized single-threaded path if the matrix has fewer than 64 rows, or during single-vector calculations (where `cols_b == 1`).
 *   **Advanced Optimizers (SGD & Adam):** Built-in support for both standard Stochastic Gradient Descent (SGD) and the highly efficient **Adam** optimizer. It features momentum, velocity, and bias correction (`beta1`, `beta2`) for rapid and stable convergence.
 *   **True Zero-Allocation Training:** Bypasses garbage collection and manual allocator (`malloc`/`free`) overhead. Once initialized, the entire forward pass, backpropagation, and Adam weight update pipeline runs with **exactly zero** dynamic memory allocations, maintaining all active data inside pre-allocated cache buffers.
 *   **Quake III Fast Inverse Square Root:** Replaces the heavy hardware square root (`C.sqrtf`/`math.sqrt`) and division operations inside the innermost Adam updates. By employing the legendary fast inverse square root bit-hack (optimized for both `f32` and `f64` precision), Adam updates are converted into ultra-fast, low-cycle multiplications.
