@@ -38,9 +38,9 @@ fn main() {
 			return
 		}
 	} else {
-		model.add(3, 128, .relu)
-		model.add(128, 64, .relu)
-		model.add(64, 4, .linear)
+		model.add(3, 128, .relu, 0, false)
+		model.add(128, 64, .relu, 0, false)
+		model.add(64, 4, .linear, 0, false)
 
 		model.set_normalize(true)
 
