@@ -10,25 +10,27 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 ## Key Features
 
 *   **Advanced Optimizers (SGD & Adam):** Built-in support for both standard Stochastic Gradient Descent (SGD) and the highly efficient **Adam** optimizer. It features momentum, velocity, and bias correction (`beta1`, `beta2`) for rapid and stable convergence.
+*   **True Zero-Allocation Training:** Bypasses garbage collection and manual allocator (`malloc`/`free`) overhead. Once initialized, the entire forward pass, backpropagation, and Adam weight update pipeline runs with **exactly zero** dynamic memory allocations, maintaining all active data inside pre-allocated cache buffers.
+*   **Quake III Fast Inverse Square Root:** Replaces the heavy hardware square root (`C.sqrtf`/`math.sqrt`) and division operations inside the innermost Adam updates. By employing the legendary fast inverse square root bit-hack (optimized for both `f32` and `f64` precision), Adam updates are converted into ultra-fast, low-cycle multiplications.
+*   **Branchless Activation Functions (ReLU):** To prevent CPU pipeline stalls caused by branch mispredictions, ReLU and its derivatives are written in a completely branchless manner using floating-point bitwise absolute values (`fast_abs`) and sign copies (`fast_copysign`).
+*   **V Bounds Checking Bypass:** Bypasses V's implicit array bounds checking inside hot training loops and layer operations. By utilizing unsafe pointer indexing (`&training_inputs[0]`, `&nn.layers[0]`), the compiler translates loops directly into raw, high-performance C pointer arithmetic.
+*   **Loop Fusion:** Evaluates Mean Squared Error (MSE) loss and calculates the output layer's gradient delta ($\delta$) simultaneously in a single fused loop. This reduces cache sweeps and significantly lowers memory bus traffic.
+*   **Flexible Compile-Time Precision (`Real` Alias):** Features dynamic precision mapping. Single-precision `f32` is employed as the default compile-time mode to maximize SSE2/NEON vectorization throughput and cut memory bandwidth requirements in half. If high precision is required, passing `-d vnm_f64` at compile-time seamlessly promotes the engine to double-precision `f64`.
+*   **Seamless User-Friendly Boundaries:** To preserve clean syntax, creator APIs (`vector`, `scalar`, `new_tensor`) accept standard V float arrays (`[]f64`). The library automatically and internally maps these inputs to the active engine precision (`Real`) during tensor instantiation with negligible overhead.
 *   **RNN & Sequence Modeling Support:** Beyond standard feed-forward networks, `vnm` features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing.
 *   **Dropout Regularization:** Includes a highly optimized dropout mechanism with drop masks. It randomly deactivates neurons during the training phase and automatically scales active neurons, effectively preventing overfitting in complex architectures.
 *   **JSON Model Serialization (Save/Load):** Fully trained models—including network topology, weights, biases, and normalization parameters—can be serialized and deserialized to/from disk via standard JSON configuration with zero external dependencies.
 *   **Zero-Configuration Auto-Normalization:** Features built-in Z-Score input standardization and Target Min-Max scaling. The model automatically computes, stores, and serializes feature means, standard deviations, and boundaries during training, applying them seamlessly to future predictions with zero user configuration.
 *   **Compile-Time Conditional Safety (`-d vnm_safe`):** Dual-mode compilation ensures maximum versatility. You can compile with size-validation, dimension mismatch checks, and zero-division assertions during development, or completely prune these assertions at compile-time for absolute zero-overhead execution in production.
-*   **Flexible Compile-Time Precision (`Fnn` Alias):** Seamlessly toggles between Double-Precision `f64` (default) and Single-Precision `f32` (by passing `-d vnm_f32` at compile-time). This allows you to double your SIMD (AVX/NEON) vectorization throughput and cut memory bandwidth requirements in half when needed.
 *   **He (Kaiming) Initialization:** Built-in uniform random initialization ($\sqrt{6 / n_{\text{in}}}$) optimized specifically for stable training, preventing gradient explosion and dead neurons.
-*   **Manual Memory Control:** Bypasses garbage collection latency. It utilizes explicit manual memory freeing (`.free()`) on tensors, matrices, and layers to maintain a low, highly predictable memory footprint.
-*   **Zero-Transpose GEMM via IKJ Layout:** Parallel matrix multiplication implements an optimized IKJ loop order. This naturally accesses both matrix operands contiguously (stride-1), entirely eliminating the need for matrix transposition and saving RAM allocation overhead.
-*   **Advanced Cache Tiling (Loop Blocking):** Large matrix multiplications are partitioned into optimized cache-resident tiles ($64 \times 64$). This prevents CPU cache thrashing and keeps core data close to the arithmetic logic units.
-*   **Hybrid MatMul Dispatch:** Employs a dual-mode dispatch mechanism. It uses register-allocated, low-latency IJK operations for small calculations and scales to tiled IKJ multi-threaded parallel execution (`matmul_parallel`) using host threads (`runtime.nr_jobs()`) for larger matrix workloads.
-*   **Compiler-Level Vectorization:** Integrates compiler-level flags (`#flag -O3`, `-ffast-math`, `-march=native`, `-funroll-loops`) directly within V source files, instructing the compiler backend (GCC/Clang) to generate vectorized SIMD instructions (AVX/NEON).
+*   **Zero-Transpose GEMM via IKJ Layout:** Matrix multiplication implements an optimized IKJ loop order. This naturally accesses both matrix operands contiguously (stride-1), entirely eliminating the need for matrix transposition and saving RAM allocation overhead.
 
 ---
 
 ## Technical Specifications
 
 ### Core Architecture
-1.  **Tensor & Matrix Layer:** Features a multi-dimensional `Tensor` interface and flat `Matrix` layouts utilizing raw pointers, flexible precision `Fnn` arrays, and manual memory deallocation routines.
+1.  **Tensor & Matrix Layer:** Features a multi-dimensional `Tensor` interface and flat `Matrix` layouts utilizing raw pointers, flexible precision `Real` arrays, and manual memory deallocation routines.
 2.  **Sequential API:** Employs a linear configuration interface (`model.add()`) to specify layers, mapping input/output sizes, activation types, dropout rates, and RNN toggles effortlessly.
 3.  **Configurable Activations:** Supports multiple distinct activation functions (`sigmoid`, `relu`, `tanh`, and `linear`), automatically handling their derivatives during backpropagation.
 
@@ -71,7 +73,7 @@ fn main() {
 	mut inputs := []vnm.Tensor{}
 	mut targets := []vnm.Tensor{}
 
-	// XOR Dataset
+	// XOR Dataset (accepts standard []f64 literals natively)
 	inputs << vnm.vector([0.0, 0.0])
 	targets << vnm.vector([0.0])
 
@@ -157,21 +159,21 @@ pkg update -y && pkg install -y git clang make && if ! command -v v >/dev/null 2
 ## Compilation Modes
 
 ### 1. Safe & Debug Mode
-Compiles with compile-time conditional checks, bounds/dimension assertions, and verbose validation logging (defaults to double-precision `f64`):
+Compiles with compile-time conditional checks, bounds/dimension assertions, and verbose validation logging (defaults to default `f32` precision):
 ```bash
 v -d vnm_safe -cc clang main.v -o main && ./main
 ```
 
-### 2. High-Performance Double-Precision (f64) Production Mode
-Strips away all assertions, logs, and dimension checks at compile-time, maximizing compiler-level loop unrolling and CPU optimizations using double-precision float arrays:
+### 2. Ultra-Performance Single-Precision (f32) Production Mode (Default)
+Strips away all assertions, logs, and dimension checks at compile-time, maximizing compiler-level loop unrolling and SSE2/NEON hardware vectorization:
 ```bash
 v -cc clang -prod -d no_bounds_checking main.v -o main && ./main
 ```
 
-### 3. Ultra-Performance Single-Precision (f32) Production Mode
-Compiles with single-precision float arrays to leverage 2x higher vectorization throughput (SIMD) and half the memory bandwidth footprint, delivering maximum execution speed:
+### 3. High-Performance Double-Precision (f64) Production Mode
+Promotes precision to double-precision `f64` for backward compatibility or strict high-precision simulations, while keeping all zero-allocation engine speedups intact:
 ```bash
-v -d vnm_f32 -cc clang -prod -d no_bounds_checking main.v -o main && ./main
+v -d vnm_f64 -cc clang -prod -d no_bounds_checking main.v -o main && ./main
 ```
 
 ---
