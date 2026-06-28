@@ -47,125 +47,38 @@ $if vnm_f64 ? {
 	}
 }
 
-pub enum ApproxLevel {
-	fast
-	precise
-	balanced
-	extreme
+@[inline]
+fn approx_sigmoid(x Real) Real {
+	abs_x := if x < Real(0.0) { -x } else { x }
+	return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
 }
 
 @[inline]
-fn approx_sigmoid(x Real, level ApproxLevel) Real {
-	match level {
-		.precise {
-			return Real(1.0) / (Real(1.0) + Real(math.exp(f64(-x))))
-		}
-		.balanced {
-			return Real(0.5) + Real(0.5) * approx_tanh(Real(0.5) * x, .balanced)
-		}
-		.fast {
-			abs_x := if x < Real(0.0) { -x } else { x }
-			return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
-		}
-		.extreme {
-			val := Real(0.2) * x + Real(0.5)
-			if val < Real(0.0) { return Real(0.0) }
-			if val > Real(1.0) { return Real(1.0) }
-			return val
-		}
-	}
+fn approx_tanh(x Real) Real {
+	abs_x := if x < Real(0.0) { -x } else { x }
+	return x / (Real(1.0) + abs_x)
 }
 
 @[inline]
-fn approx_tanh(x Real, level ApproxLevel) Real {
-	match level {
-		.precise {
-			return Real(math.tanh(f64(x)))
-		}
-		.balanced {
-			if x < Real(-3.0) { return Real(-1.0) }
-			if x > Real(3.0) { return Real(1.0) }
-			return x * (Real(27.0) + x * x) / (Real(27.0) + Real(9.0) * x * x)
-		}
-		.fast {
-			abs_x := if x < Real(0.0) { -x } else { x }
-			return x / (Real(1.0) + abs_x)
-		}
-		.extreme {
-			if x < Real(-1.0) { return Real(-1.0) }
-			if x > Real(1.0) { return Real(1.0) }
-			return x
-		}
-	}
-}
-
-@[inline]
-fn approx_inv_sqrt(x Real, level ApproxLevel) Real {
-	match level {
-		.precise {
-			return Real(1.0) / Real(math.sqrt(f64(x)))
-		}
-		.balanced {
-			$if vnm_f64 ? {
-				mut xhalf := Real(0.5) * x
-				mut i := u64(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5fe6eb50c7b537a9 - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				y = y * (Real(1.5) - xhalf * y * y)
-				y = y * (Real(1.5) - xhalf * y * y)
-				return y
-			} $else {
-				mut xhalf := Real(0.5) * x
-				mut i := u32(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5f3759df - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				y = y * (Real(1.5) - xhalf * y * y)
-				y = y * (Real(1.5) - xhalf * y * y)
-				return y
-			}
-		}
-		.fast {
-			$if vnm_f64 ? {
-				mut xhalf := Real(0.5) * x
-				mut i := u64(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5fe6eb50c7b537a9 - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				y = y * (Real(1.5) - xhalf * y * y)
-				return y
-			} $else {
-				mut xhalf := Real(0.5) * x
-				mut i := u32(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5f3759df - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				y = y * (Real(1.5) - xhalf * y * y)
-				return y
-			}
-		}
-		.extreme {
-			$if vnm_f64 ? {
-				mut i := u64(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5fe6eb50c7b537a9 - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				return y
-			} $else {
-				mut i := u32(0)
-				unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-				i = 0x5f3759df - (i >> 1)
-				mut y := Real(0.0)
-				unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-				return y
-			}
-		}
+fn approx_inv_sqrt(x Real) Real {
+	$if vnm_f64 ? {
+		mut xhalf := Real(0.5) * x
+		mut i := u64(0)
+		unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+		i = 0x5fe6eb50c7b537a9 - (i >> 1)
+		mut y := Real(0.0)
+		unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+		y = y * (Real(1.5) - xhalf * y * y)
+		return y
+	} $else {
+		mut xhalf := Real(0.5) * x
+		mut i := u32(0)
+		unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+		i = 0x5f3759df - (i >> 1)
+		mut y := Real(0.0)
+		unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+		y = y * (Real(1.5) - xhalf * y * y)
+		return y
 	}
 }
 
@@ -597,7 +510,6 @@ pub mut:
 	layers        []Layer
 	optimizer     OptimizerType
 	normalize     bool = true
-	approx_level  ApproxLevel = .fast
 	means         []Real
 	stds          []Real
 }
@@ -623,7 +535,6 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 		net: NeuralNetwork{
 			optimizer: optimizer
 			normalize: true
-			approx_level: .fast
 		}
 	}
 }
@@ -631,7 +542,7 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate Real, is_rnn bool) {
 	s.net.layers << Layer{
 		weights: new_random_matrix(output_size, input_size)
-		biases: new_random_matrix(output_size, 1)
+		biases: new_matrix(output_size, 1)
 		activation_type: act
 		last_input: new_matrix(input_size, 1)
 		last_output: new_matrix(output_size, 1)
@@ -652,10 +563,6 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 
 pub fn (mut s Sequential) set_normalize(val bool) {
 	s.net.normalize = val
-}
-
-pub fn (mut s Sequential) set_approx_level(level ApproxLevel) {
-	s.net.approx_level = level
 }
 
 pub fn (mut s Sequential) free() {
@@ -821,7 +728,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.sigmoid {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = approx_sigmoid(val, nn.approx_level)
+						ptr_res[i] = approx_sigmoid(val)
 					}
 				}
 				.relu {
@@ -833,7 +740,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.tanh {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = approx_tanh(val, nn.approx_level)
+						ptr_res[i] = approx_tanh(val)
 					}
 				}
 				.linear {
@@ -955,7 +862,12 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 				beta1 := Real(0.9)
 				beta2 := Real(0.999)
 				
-				eps_sq := Real(1e-12)
+				mut eps_sq := Real(0.0)
+				$if vnm_f64 ? {
+					eps_sq = Real(1e-12)
+				} $else {
+					eps_sq = Real(1e-8)
+				}
 
 				current_layer.beta1_t *= beta1
 				current_layer.beta2_t *= beta2
@@ -984,7 +896,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 					ptr_vw[i] = vw_val
 					
 					v_hat := vw_val * inv_bias_corr2
-					ptr_w[i] -= step_size * mw_val * approx_inv_sqrt(v_hat + eps_sq, nn.approx_level)
+					ptr_w[i] -= step_size * mw_val * approx_inv_sqrt(v_hat + eps_sq)
 				}
 
 				mut ptr_b := &current_layer.biases.data[0]
@@ -1001,7 +913,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 					ptr_vb[i] = vb_val
 					
 					v_hat_b := vb_val * inv_bias_corr2
-					ptr_b[i] -= step_size * mb_val * approx_inv_sqrt(v_hat_b + eps_sq, nn.approx_level)
+					ptr_b[i] -= step_size * mb_val * approx_inv_sqrt(v_hat_b + eps_sq)
 				}
 			} else {
 				mut ptr_w := &current_layer.weights.data[0]
