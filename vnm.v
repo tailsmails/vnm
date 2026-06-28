@@ -6,10 +6,13 @@ import os
 import json
 import runtime
 
-#flag -O3
+#flag -Ofast
 #flag -ffast-math
 #flag -march=native
 #flag -funroll-loops
+#flag -flto
+#flag -fomit-frame-pointer
+#flag -ftree-vectorize
 
 fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
 
@@ -381,7 +384,7 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 				val_a := a.data[offset_a + k]
 				offset_b := k * cols_b
 				mut ptr_res := &res.data[offset_res]
-				mut ptr_b := &res.data[offset_b]
+				mut ptr_b := &b.data[offset_b] 
 				mut j := 0
 				for j < cols_b - 3 {
 					ptr_res[j] += val_a * ptr_b[j]
