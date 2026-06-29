@@ -18,8 +18,10 @@ fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
 
 $if vnm_f64 ? {
 	pub type Real = f64
+	pub type Fnn = f64
 } $else {
 	pub type Real = f32
+	pub type Fnn = f32
 }
 
 @[inline]
@@ -988,5 +990,17 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 			t.free()
 		}
 		unsafe { temp_normalized_tensors.free() }
+	}
+}
+
+@[manualfree; unsafe]
+pub fn (mut nn NeuralNetwork) train_step(input Tensor, target Tensor, lr Real) !Tensor {
+	unsafe {
+		_ = nn.train_step_internal(input, target, lr, false)!
+		last_layer := &nn.layers[nn.layers.len - 1]
+		return Tensor{
+			shape: [last_layer.last_output.data.len]
+			data: last_layer.last_output.data.clone()
+		}
 	}
 }
