@@ -384,24 +384,35 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
 		cols_a := a.cols
 		cols_b := b.cols
+		
 		if cols_b == 1 {
 			mut ptr_res := &res.data[0]
 			mut ptr_a := &a.data[0]
 			ptr_b_start := &b.data[0]
-			for _ in 0 .. a.rows {
-				mut sum := Real(0.0)
-				mut ptr_b := ptr_b_start
-				
-				for k in 0 .. cols_a {
-					sum += ptr_a[k] * ptr_b[k]
+			
+			$if arm64 && !vnm_f64 ? {
+				for _ in 0 .. a.rows {
+					*ptr_res = Real(C.neon_dot_product_arm64(&f32(ptr_a), &f32(ptr_b_start), cols_a))
+					ptr_res++
+					ptr_a += cols_a
 				}
-				
-				*ptr_res = sum
-				ptr_res++
-				ptr_a += cols_a
+			} $else {
+				for _ in 0 .. a.rows {
+					mut sum := Real(0.0)
+					mut ptr_b := ptr_b_start
+					
+					for k in 0 .. cols_a {
+						sum += ptr_a[k] * ptr_b[k]
+					}
+					
+					*ptr_res = sum
+					ptr_res++
+					ptr_a += cols_a
+				}
 			}
 			return
 		}
+		
 		zero_real(&res.data[0], res.data.len)
 		for i in 0 .. a.rows {
 			offset_res := i * cols_b
@@ -466,23 +477,34 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
 		cols_a := a.cols
 		cols_b := b.cols
+		
 		if cols_b == 1 {
 			mut ptr_res := &res.data[0]
 			mut ptr_a := &a.data[0]
 			ptr_b_start := &b.data[0]
-			for _ in 0 .. a.rows {
-				mut sum := Real(0.0)
-				mut ptr_b := ptr_b_start
-				for k in 0 .. cols_a {
-					sum += ptr_a[k] * ptr_b[k]
+			
+			$if arm64 && !vnm_f64 ? {
+				for _ in 0 .. a.rows {
+					*ptr_res += Real(C.neon_dot_product_arm64(&f32(ptr_a), &f32(ptr_b_start), cols_a))
+					ptr_res++
+					ptr_a += cols_a
 				}
-				
-				*ptr_res += sum
-				ptr_res++
-				ptr_a += cols_a
+			} $else {
+				for _ in 0 .. a.rows {
+					mut sum := Real(0.0)
+					mut ptr_b := ptr_b_start
+					for k in 0 .. cols_a {
+						sum += ptr_a[k] * ptr_b[k]
+					}
+					
+					*ptr_res += sum
+					ptr_res++
+					ptr_a += cols_a
+				}
 			}
 			return
 		}
+		
 		for i in 0 .. a.rows {
 			offset_res := i * cols_b
 			offset_a := i * cols_a
