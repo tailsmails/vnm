@@ -1043,8 +1043,10 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 		}
 		
 		if epochs >= 10 && epoch % (epochs / 10) == 0 {
-			mean_error := total_error / Real(inputs.len)
-			println("  Epoch ${epoch:5d} / ${epochs} | Active LR: ${current_lr:.6f} | Mean Squared Loss: ${mean_error:.8f}")
+			$if !vnm_silent ? {
+				mean_error := total_error / Real(inputs.len)
+				println("  Epoch ${epoch:5d} / ${epochs} | Active LR: ${current_lr:.6f} | Mean Squared Loss: ${mean_error:.8f}")
+			}
 		}
 	}
 
