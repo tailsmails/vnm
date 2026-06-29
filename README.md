@@ -62,6 +62,7 @@ If you prefer to include the source files directly within your project directory
 ```bash
 v -cc clang -prod -d no_bounds_checking main.v -o main
 ```
++ do not compile it with tcc(v main.v) if your device is arm64!
 
 ---
 
