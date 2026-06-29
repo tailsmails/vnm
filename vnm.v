@@ -13,6 +13,14 @@ import runtime
 #flag -flto
 #flag -fomit-frame-pointer
 #flag -ftree-vectorize
+#flag -I @VMODROOT
+#include "vnm_arm64.c"
+
+fn C.neon_dot_product_arm64(a &f32, b &f32, len int) f32
+fn C.approx_inv_sqrt_neon(x f32) f32
+fn C.approx_sigmoid_neon(x f32) f32
+fn C.approx_tanh_neon(x f32) f32
+fn C.fast_max_neon(a f32, b f32) f32
 
 fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
 
@@ -86,17 +94,29 @@ fn fast_exp(x Real) Real {
 
 @[inline]
 fn approx_sigmoid(x Real) Real {
-	return Real(1.0) / (Real(1.0) + fast_exp(-x))
+	$if arm64 && !vnm_f64 ? {
+		return C.approx_sigmoid_neon(x)
+	}
+	abs_x := if x < Real(0.0) { -x } else { x }
+	return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
 }
 
 @[inline]
 fn approx_tanh(x Real) Real {
-	exp_2x := fast_exp(Real(2.0) * x)
-	return (exp_2x - Real(1.0)) / (exp_2x + Real(1.0))
+	$if arm64 && !vnm_f64 ? {
+		return C.approx_tanh_neon(x)
+	}
+	abs_x := if x < Real(0.0) { -x } else { x }
+	return x / (Real(1.0) + abs_x)
 }
 
 @[inline]
 fn approx_inv_sqrt(x Real) Real {
+	$if !vnm_f64 ? {
+		$if arm64 {
+			return C.approx_inv_sqrt_neon(x)
+		}
+	}
 	$if vnm_f64 ? {
 		mut xhalf := Real(0.5) * x
 		mut i := u64(0)
@@ -355,6 +375,7 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 			for _ in 0 .. a.rows {
 				mut sum := Real(0.0)
 				mut ptr_b := ptr_b_start
+				
 				for k in 0 .. cols_a {
 					sum += ptr_a[k] * ptr_b[k]
 				}
@@ -736,7 +757,11 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.relu {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = fast_max(Real(0.0), val)
+						$if arm64 && !vnm_f64 ? {
+							ptr_res[i] = C.fast_max_neon(Real(0.0), val)
+						} $else {
+							ptr_res[i] = if val > Real(0.0) { val } else { Real(0.0) }
+						}
 					}
 				}
 				.tanh {
