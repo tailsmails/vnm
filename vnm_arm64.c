@@ -6,12 +6,21 @@
 #include <math.h>
 
 float neon_dot_product_arm64(const float* a, const float* b, int len) {
-    float32x4_t sum_vec = vdupq_n_f32(0.0f);
+    float32x4_t s0 = vdupq_n_f32(0.0f);
+    float32x4_t s1 = vdupq_n_f32(0.0f);
+    float32x4_t s2 = vdupq_n_f32(0.0f);
+    float32x4_t s3 = vdupq_n_f32(0.0f);
+    
     int i = 0;
-    for (; i < len - 3; i += 4) {
-        float32x4_t a_vec = vld1q_f32(&a[i]);
-        float32x4_t b_vec = vld1q_f32(&b[i]);
-        sum_vec = vmlaq_f32(sum_vec, a_vec, b_vec);
+    for (; i <= len - 16; i += 16) {
+        s0 = vmlaq_f32(s0, vld1q_f32(a + i),      vld1q_f32(b + i));
+        s1 = vmlaq_f32(s1, vld1q_f32(a + i + 4),  vld1q_f32(b + i + 4));
+        s2 = vmlaq_f32(s2, vld1q_f32(a + i + 8),  vld1q_f32(b + i + 8));
+        s3 = vmlaq_f32(s3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
+    }
+    float32x4_t sum_vec = vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3));
+    for (; i <= len - 4; i += 4) {
+        sum_vec = vmlaq_f32(sum_vec, vld1q_f32(a + i), vld1q_f32(b + i));
     }
     float sum = vaddvq_f32(sum_vec);
     for (; i < len; i++) {
