@@ -49,16 +49,50 @@ $if vnm_f64 ? {
 	}
 }
 
+fn C.fmaxf(x f32, y f32) f32
+fn C.fmax(x f64, y f64) f64
+
+@[inline]
+fn fast_max(a Real, b Real) Real {
+	$if vnm_f64 ? {
+		return C.fmax(a, b)
+	} $else {
+		return C.fmaxf(a, b)
+	}
+}
+
+@[inline]
+fn fast_exp(x Real) Real {
+	$if vnm_f64 ? {
+		mut cl_x := if x < Real(-700.0) { Real(-700.0) } else { x }
+		cl_x = if cl_x > Real(700.0) { Real(700.0) } else { cl_x }
+		fb := cl_x * Real(1442695.0408889634)
+		mut bits := u64(0)
+		bits = u64(i64(fb) + 4607182418800017408)
+		mut res := Real(0.0)
+		unsafe { C.memcpy(&res, &bits, sizeof(Real)) }
+		return res
+	} $else {
+		mut cl_x := if x < Real(-88.0) { Real(-88.0) } else { x }
+		cl_x = if cl_x > Real(88.0) { Real(88.0) } else { cl_x }
+		fb := cl_x * Real(12102203.0)
+		mut bits := u32(0)
+		bits = u32(int(fb) + 1065353216)
+		mut res := Real(0.0)
+		unsafe { C.memcpy(&res, &bits, sizeof(Real)) }
+		return res
+	}
+}
+
 @[inline]
 fn approx_sigmoid(x Real) Real {
-	abs_x := if x < Real(0.0) { -x } else { x }
-	return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
+	return Real(1.0) / (Real(1.0) + fast_exp(-x))
 }
 
 @[inline]
 fn approx_tanh(x Real) Real {
-	abs_x := if x < Real(0.0) { -x } else { x }
-	return x / (Real(1.0) + abs_x)
+	exp_2x := fast_exp(Real(2.0) * x)
+	return (exp_2x - Real(1.0)) / (exp_2x + Real(1.0))
 }
 
 @[inline]
@@ -321,18 +355,10 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 			for _ in 0 .. a.rows {
 				mut sum := Real(0.0)
 				mut ptr_b := ptr_b_start
-				mut k := 0
-				for k < cols_a - 3 {
+				for k in 0 .. cols_a {
 					sum += ptr_a[k] * ptr_b[k]
-					sum += ptr_a[k+1] * ptr_b[k+1]
-					sum += ptr_a[k+2] * ptr_b[k+2]
-					sum += ptr_a[k+3] * ptr_b[k+3]
-					k += 4
 				}
-				for k < cols_a {
-					sum += ptr_a[k] * ptr_b[k]
-					k++
-				}
+				
 				*ptr_res = sum
 				ptr_res++
 				ptr_a += cols_a
@@ -373,17 +399,8 @@ fn matmul_transpose_b_inplace(a Matrix, b Matrix, mut res Matrix) {
 		for i in 0 .. a.rows {
 			val_a := a.data[i]
 			mut ptr_b := &b.data[0]
-			mut j := 0
-			for j < b_len - 3 {
+			for j in 0 .. b_len {
 				ptr_res[j] = val_a * ptr_b[j]
-				ptr_res[j+1] = val_a * ptr_b[j+1]
-				ptr_res[j+2] = val_a * ptr_b[j+2]
-				ptr_res[j+3] = val_a * ptr_b[j+3]
-				j += 4
-			}
-			for j < b_len {
-				ptr_res[j] = val_a * ptr_b[j]
-				j++
 			}
 			ptr_res += b_len
 		}
@@ -400,17 +417,8 @@ fn matmul_transpose_a_inplace(a Matrix, b Matrix, mut res Matrix) {
 			val_b := b.data[k]
 			offset_a := k * cols_a
 			mut ptr_a := &a.data[offset_a]
-			mut i := 0
-			for i < cols_a - 3 {
+			for i in 0 .. cols_a {
 				ptr_res[i] += ptr_a[i] * val_b
-				ptr_res[i+1] += ptr_a[i+1] * val_b
-				ptr_res[i+2] += ptr_a[i+2] * val_b
-				ptr_res[i+3] += ptr_a[i+3] * val_b
-				i += 4
-			}
-			for i < cols_a {
-				ptr_res[i] += ptr_a[i] * val_b
-				i++
 			}
 		}
 	}
@@ -428,18 +436,10 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 			for _ in 0 .. a.rows {
 				mut sum := Real(0.0)
 				mut ptr_b := ptr_b_start
-				mut k := 0
-				for k < cols_a - 3 {
+				for k in 0 .. cols_a {
 					sum += ptr_a[k] * ptr_b[k]
-					sum += ptr_a[k+1] * ptr_b[k+1]
-					sum += ptr_a[k+2] * ptr_b[k+2]
-					sum += ptr_a[k+3] * ptr_b[k+3]
-					k += 4
 				}
-				for k < cols_a {
-					sum += ptr_a[k] * ptr_b[k]
-					k++
-				}
+				
 				*ptr_res += sum
 				ptr_res++
 				ptr_a += cols_a
@@ -736,7 +736,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.relu {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						ptr_res[i] = if val > Real(0.0) { val } else { Real(0.0) }
+						ptr_res[i] = fast_max(Real(0.0), val)
 					}
 				}
 				.tanh {
