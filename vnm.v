@@ -14,6 +14,15 @@ import runtime
 #flag -fomit-frame-pointer
 #flag -ftree-vectorize
 #flag -I @VMODROOT
+
+$if vnm_f16 ? {
+	#flag -DVNM_F16
+} $else {
+	$if arm64 && !vnm_f32 ? && !vnm_f64 ? {
+		#flag -DVNM_F16
+	}
+}
+
 #include "vnm_arm64.c"
 
 fn C.neon_dot_product_arm64(a &f32, b &f32, len int) f32
@@ -30,6 +39,13 @@ $if vnm_f64 ? {
 } $else {
 	pub type Real = f32
 	pub type Fnn = f32
+}
+
+fn init() {
+	$if vnm_f16 ? && !arm64 {
+		println('[VNM] Warning: f16 support is only available on arm64 (AArch64) architectures!')
+		exit(1)
+	}
 }
 
 @[inline]
