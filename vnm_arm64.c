@@ -1,6 +1,6 @@
 // .vmodules/vnm/vnm_arm64.c
 
-#ifdef __ARM_NEON
+float #ifdef __ARM_NEON
 #include <arm_neon.h>
 #include <string.h>
 #include <math.h>
@@ -16,14 +16,55 @@ float neon_dot_product_arm64(const float* __restrict__ a, const float* __restric
     
     float16x8_t s0 = vdupq_n_f16(0.0f);
     float16x8_t s1 = vdupq_n_f16(0.0f);
+    float16x8_t s2 = vdupq_n_f16(0.0f);
+    float16x8_t s3 = vdupq_n_f16(0.0f);
     
     int i = 0;
+    if (len >= 32) {
+        for (; i <= len - 32; i += 32) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 64, 0, 0);
+            __builtin_prefetch(b + i + 64, 0, 0);
+            #endif
+            
+            float32x4_t a0 = vld1q_f32(a + i);
+            float32x4_t a1 = vld1q_f32(a + i + 4);
+            float32x4_t a2 = vld1q_f32(a + i + 8);
+            float32x4_t a3 = vld1q_f32(a + i + 12);
+            float32x4_t a4 = vld1q_f32(a + i + 16);
+            float32x4_t a5 = vld1q_f32(a + i + 20);
+            float32x4_t a6 = vld1q_f32(a + i + 24);
+            float32x4_t a7 = vld1q_f32(a + i + 28);
+            
+            float32x4_t b0 = vld1q_f32(b + i);
+            float32x4_t b1 = vld1q_f32(b + i + 4);
+            float32x4_t b2 = vld1q_f32(b + i + 8);
+            float32x4_t b3 = vld1q_f32(b + i + 12);
+            float32x4_t b4 = vld1q_f32(b + i + 16);
+            float32x4_t b5 = vld1q_f32(b + i + 20);
+            float32x4_t b6 = vld1q_f32(b + i + 24);
+            float32x4_t b7 = vld1q_f32(b + i + 28);
+            
+            float16x8_t va0 = vcvt_high_f16_f32(vcvt_f16_f32(a0), a1);
+            float16x8_t va1 = vcvt_high_f16_f32(vcvt_f16_f32(a2), a3);
+            float16x8_t va2 = vcvt_high_f16_f32(vcvt_f16_f32(a4), a5);
+            float16x8_t va3 = vcvt_high_f16_f32(vcvt_f16_f32(a6), a7);
+            
+            float16x8_t vb0 = vcvt_high_f16_f32(vcvt_f16_f32(b0), b1);
+            float16x8_t vb1 = vcvt_high_f16_f32(vcvt_f16_f32(b2), b3);
+            float16x8_t vb2 = vcvt_high_f16_f32(vcvt_f16_f32(b4), b5);
+            float16x8_t vb3 = vcvt_high_f16_f32(vcvt_f16_f32(b6), b7);
+            
+            s0 = vfmaq_f16(s0, va0, vb0);
+            s1 = vfmaq_f16(s1, va1, vb1);
+            s2 = vfmaq_f16(s2, va2, vb2);
+            s3 = vfmaq_f16(s3, va3, vb3);
+        }
+        s0 = vaddq_f16(s0, s2);
+        s1 = vaddq_f16(s1, s3);
+    }
+    
     for (; i <= len - 16; i += 16) {
-        #if defined(__GNUC__) || defined(__clang__)
-        __builtin_prefetch(a + i + 32, 0, 0);
-        __builtin_prefetch(b + i + 32, 0, 0);
-        #endif
-        
         float32x4_t a0 = vld1q_f32(a + i);
         float32x4_t a1 = vld1q_f32(a + i + 4);
         float32x4_t a2 = vld1q_f32(a + i + 8);
@@ -34,21 +75,11 @@ float neon_dot_product_arm64(const float* __restrict__ a, const float* __restric
         float32x4_t b2 = vld1q_f32(b + i + 8);
         float32x4_t b3 = vld1q_f32(b + i + 12);
         
-        float16x4_t ha0 = vcvt_f16_f32(a0);
-        float16x4_t ha1 = vcvt_f16_f32(a1);
-        float16x4_t ha2 = vcvt_f16_f32(a2);
-        float16x4_t ha3 = vcvt_f16_f32(a3);
+        float16x8_t va0 = vcvt_high_f16_f32(vcvt_f16_f32(a0), a1);
+        float16x8_t va1 = vcvt_high_f16_f32(vcvt_f16_f32(a2), a3);
         
-        float16x4_t hb0 = vcvt_f16_f32(b0);
-        float16x4_t hb1 = vcvt_f16_f32(b1);
-        float16x4_t hb2 = vcvt_f16_f32(b2);
-        float16x4_t hb3 = vcvt_f16_f32(b3);
-        
-        float16x8_t va0 = vcombine_f16(ha0, ha1);
-        float16x8_t va1 = vcombine_f16(ha2, ha3);
-        
-        float16x8_t vb0 = vcombine_f16(hb0, hb1);
-        float16x8_t vb1 = vcombine_f16(hb2, hb3);
+        float16x8_t vb0 = vcvt_high_f16_f32(vcvt_f16_f32(b0), b1);
+        float16x8_t vb1 = vcvt_high_f16_f32(vcvt_f16_f32(b2), b3);
         
         s0 = vfmaq_f16(s0, va0, vb0);
         s1 = vfmaq_f16(s1, va1, vb1);
@@ -75,14 +106,35 @@ float neon_dot_product_arm64(const float* __restrict__ a, const float* __restric
     float32x4_t s1 = vdupq_n_f32(0.0f);
     float32x4_t s2 = vdupq_n_f32(0.0f);
     float32x4_t s3 = vdupq_n_f32(0.0f);
+    float32x4_t s4 = vdupq_n_f32(0.0f);
+    float32x4_t s5 = vdupq_n_f32(0.0f);
+    float32x4_t s6 = vdupq_n_f32(0.0f);
+    float32x4_t s7 = vdupq_n_f32(0.0f);
     
     int i = 0;
-    for (; i <= len - 16; i += 16) {
-        #if defined(__GNUC__) || defined(__clang__)
-        __builtin_prefetch(a + i + 32, 0, 0);
-        __builtin_prefetch(b + i + 32, 0, 0);
-        #endif
+    if (len >= 32) {
+        for (; i <= len - 32; i += 32) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 64, 0, 0);
+            __builtin_prefetch(b + i + 64, 0, 0);
+            #endif
 
+            s0 = vfmaq_f32(s0, vld1q_f32(a + i),      vld1q_f32(b + i));
+            s1 = vfmaq_f32(s1, vld1q_f32(a + i + 4),  vld1q_f32(b + i + 4));
+            s2 = vfmaq_f32(s2, vld1q_f32(a + i + 8),  vld1q_f32(b + i + 8));
+            s3 = vfmaq_f32(s3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
+            s4 = vfmaq_f32(s4, vld1q_f32(a + i + 16), vld1q_f32(b + i + 16));
+            s5 = vfmaq_f32(s5, vld1q_f32(a + i + 20), vld1q_f32(b + i + 20));
+            s6 = vfmaq_f32(s6, vld1q_f32(a + i + 24), vld1q_f32(b + i + 24));
+            s7 = vfmaq_f32(s7, vld1q_f32(a + i + 28), vld1q_f32(b + i + 28));
+        }
+        s0 = vaddq_f32(s0, s4);
+        s1 = vaddq_f32(s1, s5);
+        s2 = vaddq_f32(s2, s6);
+        s3 = vaddq_f32(s3, s7);
+    }
+    
+    for (; i <= len - 16; i += 16) {
         s0 = vfmaq_f32(s0, vld1q_f32(a + i),      vld1q_f32(b + i));
         s1 = vfmaq_f32(s1, vld1q_f32(a + i + 4),  vld1q_f32(b + i + 4));
         s2 = vfmaq_f32(s2, vld1q_f32(a + i + 8),  vld1q_f32(b + i + 8));
