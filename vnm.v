@@ -15,37 +15,56 @@ import runtime
 #flag -ftree-vectorize
 #flag -I @VMODROOT
 
-$if vnm_f16 ? {
+$if vnm_f16 ? || ((arm64 || aarch64) && !vnm_f32 ? && !vnm_f64 ?) {
 	#flag -DVNM_F16
-} $else {
-	$if arm64 && !vnm_f32 ? && !vnm_f64 ? {
-		#flag -DVNM_F16
-	}
 }
 
 #include "vnm_arm64.c"
 
-fn C.neon_dot_product_arm64(a &f32, b &f32, len int) f32
-fn C.approx_inv_sqrt_neon(x f32) f32
-fn C.approx_sigmoid_neon(x f32) f32
-fn C.approx_tanh_neon(x f32) f32
-fn C.fast_max_neon(a f32, b f32) f32
+$if (arm64 || aarch64) && !vnm_f64 ? {
+	fn C.neon_dot_product_arm64(a &Real, b &Real, len int) f32
+	fn C.approx_inv_sqrt_neon(x f32) f32
+	fn C.approx_sigmoid_neon(x f32) f32
+	fn C.approx_tanh_neon(x f32) f32
+}
 
 fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
 
 $if vnm_f64 ? {
 	pub type Real = f64
 	pub type Fnn = f64
+	@[inline] pub fn to_real(val f64) Real { return Real(val) }
 } $else {
 	pub type Real = f32
 	pub type Fnn = f32
+	@[inline] pub fn to_real(val f64) Real { return Real(val) }
 }
 
+struct DummyJsonStruct {
+	v int
+}
+
+const unused_math_silencer = math.sqrt(0.0)
+const unused_rand_silencer = rand.int()
+const unused_os_silencer = os.args.len
+const unused_json_silencer = json.encode(DummyJsonStruct{v: 0})
+const unused_runtime_silencer = runtime.nr_cpus()
+
 fn init() {
-	$if vnm_f16 ? && !arm64 {
+	$if (vnm_f16 ? || ((arm64 || aarch64) && !vnm_f32 ? && !vnm_f64 ?)) && !arm64 && !aarch64 {
 		println('[VNM] Warning: f16 support is only available on arm64 (AArch64) architectures!')
 		exit(1)
 	}
+}
+
+@[inline]
+pub fn (t Tensor) get(idx int) f64 {
+	return f64(t.data[idx])
+}
+
+@[inline]
+pub fn (m Matrix) get(r int, c int) f64 {
+	return f64(m.data[r * m.cols + c])
 }
 
 @[inline]
@@ -88,18 +107,18 @@ fn fast_max(a Real, b Real) Real {
 @[inline]
 fn fast_exp(x Real) Real {
 	$if vnm_f64 ? {
-		mut cl_x := if x < Real(-700.0) { Real(-700.0) } else { x }
-		cl_x = if cl_x > Real(700.0) { Real(700.0) } else { cl_x }
-		fb := cl_x * Real(1442695.0408889634)
+		mut cl_x := if x < to_real(-700.0) { to_real(-700.0) } else { x }
+		cl_x = if cl_x > to_real(700.0) { to_real(700.0) } else { cl_x }
+		fb := cl_x * to_real(1442695.0408889634)
 		mut bits := u64(0)
 		bits = u64(i64(fb) + 4607182418800017408)
 		mut res := Real(0.0)
 		unsafe { C.memcpy(&res, &bits, sizeof(Real)) }
 		return res
 	} $else {
-		mut cl_x := if x < Real(-88.0) { Real(-88.0) } else { x }
-		cl_x = if cl_x > Real(88.0) { Real(88.0) } else { cl_x }
-		fb := cl_x * Real(12102203.0)
+		mut cl_x := if x < to_real(-88.0) { to_real(-88.0) } else { x }
+		cl_x = if cl_x > to_real(88.0) { to_real(88.0) } else { cl_x }
+		fb := cl_x * to_real(12102203.0)
 		mut bits := u32(0)
 		bits = u32(int(fb) + 1065353216)
 		mut res := Real(0.0)
@@ -110,46 +129,37 @@ fn fast_exp(x Real) Real {
 
 @[inline]
 fn approx_sigmoid(x Real) Real {
-	$if arm64 && !vnm_f64 ? {
+	$if (arm64 || aarch64) && !vnm_f64 ? {
 		return C.approx_sigmoid_neon(x)
 	}
-	abs_x := if x < Real(0.0) { -x } else { x }
-	return Real(0.5) + (Real(0.5) * x) / (Real(1.0) + abs_x)
+	abs_x := if x < to_real(0.0) { to_real(0.0) - x } else { x }
+	return to_real(0.5) + (to_real(0.5) * x) / (to_real(1.0) + abs_x)
 }
 
 @[inline]
 fn approx_tanh(x Real) Real {
-	$if arm64 && !vnm_f64 ? {
+	$if (arm64 || aarch64) && !vnm_f64 ? {
 		return C.approx_tanh_neon(x)
 	}
-	abs_x := if x < Real(0.0) { -x } else { x }
-	return x / (Real(1.0) + abs_x)
+	abs_x := if x < to_real(0.0) { to_real(0.0) - x } else { x }
+	return x / (to_real(1.0) + abs_x)
 }
 
 @[inline]
 fn approx_inv_sqrt(x Real) Real {
-	$if !vnm_f64 ? {
-		$if arm64 {
+	$if vnm_f64 ? {
+		return to_real(1.0) / math.sqrt(x)
+	} $else {
+		$if arm64 || aarch64 {
 			return C.approx_inv_sqrt_neon(x)
 		}
-	}
-	$if vnm_f64 ? {
-		mut xhalf := Real(0.5) * x
-		mut i := u64(0)
-		unsafe { C.memcpy(&i, &x, sizeof(Real)) }
-		i = 0x5fe6eb50c7b537a9 - (i >> 1)
-		mut y := Real(0.0)
-		unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-		y = y * (Real(1.5) - xhalf * y * y)
-		return y
-	} $else {
-		mut xhalf := Real(0.5) * x
+		mut xhalf := to_real(0.5) * x
 		mut i := u32(0)
 		unsafe { C.memcpy(&i, &x, sizeof(Real)) }
 		i = 0x5f3759df - (i >> 1)
-		mut y := Real(0.0)
+		mut y := to_real(0.0)
 		unsafe { C.memcpy(&y, &i, sizeof(Real)) }
-		y = y * (Real(1.5) - xhalf * y * y)
+		y = y * (to_real(1.5) - xhalf * y * y)
 		return y
 	}
 }
@@ -177,7 +187,7 @@ pub fn new_tensor(shape []int, data []f64) Tensor {
 	total_size := get_shape_size(shape)
 	mut actual_data := to_real_array(data)
 	if data.len < total_size {
-		actual_data = []Real{len: total_size, init: Real(0.0)}
+		actual_data = []Real{len: total_size, init: to_real(0.0)}
 	}
 	return Tensor{
 		shape: shape
@@ -195,7 +205,7 @@ pub fn vector(data []f64) Tensor {
 pub fn scalar(val f64) Tensor {
 	return Tensor{
 		shape: [1, 1]
-		data: [Real(val)]
+		data: [to_real(val)]
 	}
 }
 
@@ -241,7 +251,7 @@ pub fn new_matrix(rows int, cols int) Matrix {
 	return Matrix{
 		rows: rows
 		cols: cols
-		data: []Real{len: rows * cols, init: Real(0.0)}
+		data: []Real{len: rows * cols, init: to_real(0.0)}
 	}
 }
 
@@ -253,9 +263,9 @@ fn rand_range(min Real, max Real) Real {
 
 pub fn new_random_matrix(rows int, cols int) Matrix {
 	mut m := new_matrix(rows, cols)
-	boundary := fast_sqrt(Real(6.0) / Real(cols))
+	boundary := fast_sqrt(to_real(6.0) / to_real(cols))
 	for i in 0 .. m.data.len {
-		m.data[i] = rand_range(-boundary, boundary)
+		m.data[i] = rand_range(to_real(0.0) - boundary, boundary)
 	}
 	return m
 }
@@ -300,7 +310,7 @@ fn copy_real(dest &Real, src &Real, len int) {
 fn zero_real(dest &Real, len int) {
 	unsafe {
 		for i in 0 .. len {
-			dest[i] = Real(0.0)
+			dest[i] = to_real(0.0)
 		}
 	}
 }
@@ -345,7 +355,7 @@ fn matmul_worker(args MatmulArgs) {
 @[inline; unsafe]
 fn matmul_inplace(a Matrix, b Matrix, mut res Matrix) {
 	unsafe {
-		if a.rows < 64 {
+		if a.rows < 256 {
 			matmul_serial_inplace(a, b, mut res)
 			return
 		}
@@ -390,15 +400,15 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 			mut ptr_a := &a.data[0]
 			ptr_b_start := &b.data[0]
 			
-			$if arm64 && !vnm_f64 ? {
+			$if (arm64 || aarch64) && !vnm_f64 ? {
 				for _ in 0 .. a.rows {
-					*ptr_res = Real(C.neon_dot_product_arm64(&f32(ptr_a), &f32(ptr_b_start), cols_a))
+					*ptr_res = to_real(C.neon_dot_product_arm64(ptr_a, ptr_b_start, cols_a))
 					ptr_res++
 					ptr_a += cols_a
 				}
 			} $else {
 				for _ in 0 .. a.rows {
-					mut sum := Real(0.0)
+					mut sum := to_real(0.0)
 					mut ptr_b := ptr_b_start
 					
 					for k in 0 .. cols_a {
@@ -483,15 +493,15 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 			mut ptr_a := &a.data[0]
 			ptr_b_start := &b.data[0]
 			
-			$if arm64 && !vnm_f64 ? {
+			$if (arm64 || aarch64) && !vnm_f64 ? {
 				for _ in 0 .. a.rows {
-					*ptr_res += Real(C.neon_dot_product_arm64(&f32(ptr_a), &f32(ptr_b_start), cols_a))
+					*ptr_res += to_real(C.neon_dot_product_arm64(ptr_a, ptr_b_start, cols_a))
 					ptr_res++
 					ptr_a += cols_a
 				}
 			} $else {
 				for _ in 0 .. a.rows {
-					mut sum := Real(0.0)
+					mut sum := to_real(0.0)
 					mut ptr_b := ptr_b_start
 					for k in 0 .. cols_a {
 						sum += ptr_a[k] * ptr_b[k]
@@ -600,7 +610,7 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 	}
 }
 
-pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate Real, is_rnn bool) {
+pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate f64, is_rnn bool) {
 	s.net.layers << Layer{
 		weights: new_random_matrix(output_size, input_size)
 		biases: new_matrix(output_size, 1)
@@ -613,8 +623,8 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 		v_w: new_matrix(output_size, input_size)
 		m_b: new_matrix(output_size, 1)
 		v_b: new_matrix(output_size, 1)
-		beta1_t: Real(1.0)
-		beta2_t: Real(1.0)
+		beta1_t: to_real(1.0)
+		beta2_t: to_real(1.0)
 		dropout_rate: dropout_rate
 		is_rnn: is_rnn
 		hidden_weights: if is_rnn { new_random_matrix(output_size, output_size) } else { new_matrix(1, 1) }
@@ -660,8 +670,8 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 		if nn.stds.len > 0 { nn.stds.free() }
 	}
 
-	nn.means = []Real{len: feat_size, init: Real(0.0)}
-	nn.stds = []Real{len: feat_size, init: Real(0.0)}
+	nn.means = []Real{len: feat_size, init: to_real(0.0)}
+	nn.stds = []Real{len: feat_size, init: to_real(0.0)}
 
 	unsafe {
 		mut ptr_mean_start := &nn.means[0]
@@ -681,7 +691,7 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 			}
 		}
 
-		inv_m := Real(1.0) / Real(inputs.len)
+		inv_m := to_real(1.0) / to_real(inputs.len)
 		ptr_m = ptr_mean_start
 		for _ in 0 .. feat_size {
 			*ptr_m *= inv_m
@@ -702,7 +712,7 @@ fn (mut nn NeuralNetwork) compute_normalization_params(inputs []Tensor) {
 		}
 
 		ptr_s = ptr_std_start
-		eps := Real(1e-8)
+		eps := to_real(1e-8)
 		for _ in 0 .. feat_size {
 			*ptr_s = fast_sqrt(*ptr_s * inv_m) + eps
 			ptr_s++
@@ -718,16 +728,16 @@ pub fn (mut s Sequential) predict(input Tensor) !Tensor {
 }
 
 @[manualfree]
-pub fn (mut s Sequential) train(inputs []Tensor, targets []Tensor, epochs int, lr Real) ! {
+pub fn (mut s Sequential) train(inputs []Tensor, targets []Tensor, epochs int, lr f64) ! {
 	unsafe {
-		s.net.train_with_decay(inputs, targets, epochs, lr, Real(1.0), 0)!
+		s.net.train_with_decay(inputs, targets, epochs, to_real(lr), to_real(1.0), 0)!
 	}
 }
 
 @[manualfree]
-pub fn (mut s Sequential) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr Real, decay_rate Real, decay_steps int) ! {
+pub fn (mut s Sequential) train_with_decay(inputs []Tensor, targets []Tensor, epochs int, lr f64, decay_rate f64, decay_steps int) ! {
 	unsafe {
-		s.net.train_with_decay(inputs, targets, epochs, lr, decay_rate, decay_steps)!
+		s.net.train_with_decay(inputs, targets, epochs, to_real(lr), to_real(decay_rate), decay_steps)!
 	}
 }
 
@@ -795,11 +805,7 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				.relu {
 					for i in 0 .. len {
 						val := ptr_res[i] + ptr_bias[i]
-						$if arm64 && !vnm_f64 ? {
-							ptr_res[i] = C.fast_max_neon(Real(0.0), val)
-						} $else {
-							ptr_res[i] = if val > Real(0.0) { val } else { Real(0.0) }
-						}
+						ptr_res[i] = if val > to_real(0.0) { val } else { to_real(0.0) }
 					}
 				}
 				.tanh {
@@ -851,7 +857,7 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 		nn.forward_pass(input, !is_normalized)!
 
 		mut output_layer := &nn.layers[nn.layers.len - 1]
-		mut step_loss := Real(0.0)
+		mut step_loss := to_real(0.0)
 		
 		mut ptr_delta := &output_layer.delta.data[0]
 		mut ptr_out := &output_layer.last_output.data[0]
@@ -863,21 +869,21 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 				for i in 0 .. len {
 					error_val := ptr_out[i] - ptr_target[i]
 					step_loss += error_val * error_val
-					ptr_delta[i] = error_val * (ptr_out[i] * (Real(1.0) - ptr_out[i]))
+					ptr_delta[i] = error_val * (ptr_out[i] * (to_real(1.0) - ptr_out[i]))
 				}
 			}
 			.relu {
 				for i in 0 .. len {
 					error_val := ptr_out[i] - ptr_target[i]
 					step_loss += error_val * error_val
-					ptr_delta[i] = if ptr_out[i] > Real(0.0) { error_val } else { Real(0.0) }
+					ptr_delta[i] = if ptr_out[i] > to_real(0.0) { error_val } else { to_real(0.0) }
 				}
 			}
 			.tanh {
 				for i in 0 .. len {
 					error_val := ptr_out[i] - ptr_target[i]
 					step_loss += error_val * error_val
-					ptr_delta[i] = error_val * (Real(1.0) - (ptr_out[i] * ptr_out[i]))
+					ptr_delta[i] = error_val * (to_real(1.0) - (ptr_out[i] * ptr_out[i]))
 				}
 			}
 			.linear {
@@ -906,17 +912,17 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 				match prev_layer.activation_type {
 					.sigmoid {
 						for i in 0 .. len_prev {
-							ptr_next[i] = ptr_next[i] * (ptr_prev_out[i] * (Real(1.0) - ptr_prev_out[i]))
+							ptr_next[i] = ptr_next[i] * (ptr_prev_out[i] * (to_real(1.0) - ptr_prev_out[i]))
 						}
 					}
 					.relu {
 						for i in 0 .. len_prev {
-							ptr_next[i] = if ptr_prev_out[i] > Real(0.0) { ptr_next[i] } else { Real(0.0) }
+							ptr_next[i] = if ptr_prev_out[i] > to_real(0.0) { ptr_next[i] } else { to_real(0.0) }
 						}
 					}
 					.tanh {
 						for i in 0 .. len_prev {
-							ptr_next[i] = ptr_next[i] * (Real(1.0) - (ptr_prev_out[i] * ptr_prev_out[i]))
+							ptr_next[i] = ptr_next[i] * (to_real(1.0) - (ptr_prev_out[i] * ptr_prev_out[i]))
 						}
 					}
 					.linear {}
@@ -924,32 +930,32 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 			}
 
 			if _likely_(nn.optimizer == .adam) {
-				beta1 := Real(0.9)
-				beta2 := Real(0.999)
+				beta1 := to_real(0.9)
+				beta2 := to_real(0.999)
 				
-				mut eps_sq := Real(0.0)
+				mut eps_sq := to_real(0.0)
 				$if vnm_f64 ? {
-					eps_sq = Real(1e-12)
+					eps_sq = to_real(1e-12)
 				} $else {
-					eps_sq = Real(1e-8)
+					eps_sq = to_real(1e-8)
 				}
 
 				current_layer.beta1_t *= beta1
 				current_layer.beta2_t *= beta2
 
-				bias_correction1 := Real(1.0) - current_layer.beta1_t
-				bias_correction2 := Real(1.0) - current_layer.beta2_t
+				bias_correction1 := to_real(1.0) - current_layer.beta1_t
+				bias_correction2 := to_real(1.0) - current_layer.beta2_t
 
 				mut ptr_w := &current_layer.weights.data[0]
 				mut ptr_g := &current_layer.grad_w.data[0]
 				mut ptr_mw := &current_layer.m_w.data[0]
 				mut ptr_vw := &current_layer.v_w.data[0]
 				
-				one_minus_beta1 := Real(1.0) - beta1
-				one_minus_beta2 := Real(1.0) - beta2
+				one_minus_beta1 := to_real(1.0) - beta1
+				one_minus_beta2 := to_real(1.0) - beta2
 				
 				step_size := lr / bias_correction1
-				inv_bias_corr2 := Real(1.0) / bias_correction2
+				inv_bias_corr2 := to_real(1.0) / bias_correction2
 				
 				len_w := current_layer.weights.data.len
 				
@@ -1032,11 +1038,11 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 	}
 
 	for epoch in 0 .. epochs {
-		if _unlikely_(decay_rate < Real(1.0) && decay_steps > 0 && epoch > 0 && epoch % decay_steps == 0) {
+		if _unlikely_(decay_rate < to_real(1.0) && decay_steps > 0 && epoch > 0 && epoch % decay_steps == 0) {
 			current_lr *= decay_rate
 		}
 
-		mut total_error := Real(0.0)
+		mut total_error := to_real(0.0)
 		for i in 0 .. training_inputs.len {
 			step_loss := nn.train_step_internal(training_inputs[i], targets[i], current_lr, true)!
 			total_error += step_loss
@@ -1044,7 +1050,7 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 		
 		if epochs >= 10 && epoch % (epochs / 10) == 0 {
 			$if !vnm_silent ? {
-				mean_error := total_error / Real(inputs.len)
+				mean_error := total_error / to_real(inputs.len)
 				println("  Epoch ${epoch:5d} / ${epochs} | Active LR: ${current_lr:.6f} | Mean Squared Loss: ${mean_error:.8f}")
 			}
 		}
@@ -1059,9 +1065,9 @@ pub fn (mut nn NeuralNetwork) train_with_decay(inputs []Tensor, targets []Tensor
 }
 
 @[manualfree; unsafe]
-pub fn (mut nn NeuralNetwork) train_step(input Tensor, target Tensor, lr Real) !Tensor {
+pub fn (mut nn NeuralNetwork) train_step(input Tensor, target Tensor, lr f64) !Tensor {
 	unsafe {
-		_ = nn.train_step_internal(input, target, lr, false)!
+		_ = nn.train_step_internal(input, target, to_real(lr), false)!
 		last_layer := &nn.layers[nn.layers.len - 1]
 		return Tensor{
 			shape: [last_layer.last_output.data.len]
