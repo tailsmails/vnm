@@ -1,17 +1,24 @@
 // .vmodules/vnm/vnm_arm64.c
 
-float #ifdef __ARM_NEON
+#ifdef __ARM_NEON
 #include <arm_neon.h>
 #include <string.h>
 #include <math.h>
 
-#if defined(VNM_F16) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
-#include <arm_fp16.h>
+#ifdef VNM_F16
+  #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+    #include <arm_fp16.h>
+  #endif
+#endif
 
-float neon_dot_product_arm64(const float* __restrict__ a, const float* __restrict__ b, int len) {
+typedef float vnm_float_t;
+
+#if defined(VNM_F16) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+
+float neon_dot_product_arm64(const vnm_float_t* __restrict__ a, const vnm_float_t* __restrict__ b, int len) {
     #if defined(__GNUC__) || defined(__clang__)
-    a = (const float*)__builtin_assume_aligned(a, 16);
-    b = (const float*)__builtin_assume_aligned(b, 16);
+    a = (const vnm_float_t*)__builtin_assume_aligned(a, 16);
+    b = (const vnm_float_t*)__builtin_assume_aligned(b, 16);
     #endif
     
     float16x8_t s0 = vdupq_n_f16(0.0f);
@@ -96,10 +103,10 @@ float neon_dot_product_arm64(const float* __restrict__ a, const float* __restric
 
 #else
 
-float neon_dot_product_arm64(const float* __restrict__ a, const float* __restrict__ b, int len) {
+float neon_dot_product_arm64(const vnm_float_t* __restrict__ a, const vnm_float_t* __restrict__ b, int len) {
     #if defined(__GNUC__) || defined(__clang__)
-    a = (const float*)__builtin_assume_aligned(a, 16);
-    b = (const float*)__builtin_assume_aligned(b, 16);
+    a = (const vnm_float_t*)__builtin_assume_aligned(a, 16);
+    b = (const vnm_float_t*)__builtin_assume_aligned(b, 16);
     #endif
 
     float32x4_t s0 = vdupq_n_f32(0.0f);
@@ -191,7 +198,9 @@ float fast_max_neon(float a, float b) {
 }
 
 #else
-float neon_dot_product_arm64(const float* a, const float* b, int len) {
+typedef float vnm_float_t;
+
+float neon_dot_product_arm64(const vnm_float_t* a, const vnm_float_t* b, int len) {
     float sum = 0.0f;
     for (int i = 0; i < len; i++) {
         sum += a[i] * b[i];
