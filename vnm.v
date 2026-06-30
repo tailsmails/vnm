@@ -423,6 +423,11 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 			return
 		}
 		
+		if a.rows >= 128 || cols_a >= 128 || cols_b >= 128 {
+			matmul_tiled_inplace(a, b, mut res)
+			return
+		}
+		
 		zero_real(&res.data[0], res.data.len)
 		for i in 0 .. a.rows {
 			offset_res := i * cols_b
@@ -1072,6 +1077,46 @@ pub fn (mut nn NeuralNetwork) train_step(input Tensor, target Tensor, lr f64) !T
 		return Tensor{
 			shape: [last_layer.last_output.data.len]
 			data: last_layer.last_output.data.clone()
+		}
+	}
+}
+
+const block_size = 64
+
+@[inline; unsafe]
+fn matmul_tiled_inplace(a Matrix, b Matrix, mut res Matrix) {
+	unsafe {
+		zero_real(&res.data[0], res.data.len)
+		m := a.rows
+		k_sz := a.cols
+		n := b.cols
+		mut ih := 0
+		for ih < m {
+			i_end := if ih + block_size < m { ih + block_size } else { m }
+			mut kh := 0
+			for kh < k_sz {
+				k_end := if kh + block_size < k_sz { kh + block_size } else { k_sz }
+				mut jh := 0
+				for jh < n {
+					j_end := if jh + block_size < n { jh + block_size } else { n }
+					for i in ih .. i_end {
+						offset_res := i * n
+						offset_a := i * k_sz
+						for k in kh .. k_end {
+							val_a := a.data[offset_a + k]
+							offset_b := k * n
+							mut ptr_res := &res.data[offset_res]
+							mut ptr_b := &b.data[offset_b]
+							for j in jh .. j_end {
+								ptr_res[j] += val_a * ptr_b[j]
+							}
+						}
+					}
+					jh += block_size
+				}
+				kh += block_size
+			}
+			ih += block_size
 		}
 	}
 }
