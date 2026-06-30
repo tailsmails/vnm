@@ -13,6 +13,7 @@ import runtime
 #flag -flto
 #flag -fomit-frame-pointer
 #flag -ftree-vectorize
+#flag -falign-loops=32
 #flag -I @VMODROOT
 
 $if vnm_f16 ? || ((arm64 || aarch64) && !vnm_f32 ? && !vnm_f64 ?) {
@@ -174,6 +175,28 @@ pub fn approx_gelu(x Real) Real {
 	one := to_real(1.0)
 	inner := const_1 * x + const_2 * x * x * x
 	return half * x * (one + approx_tanh(inner))
+}
+
+@[inline]
+pub fn approx_log2(x Real) Real {
+	$if vnm_f64 ? {
+		mut bits := u64(0)
+		unsafe { C.memcpy(&bits, &x, sizeof(f64)) }
+		mut val := Real(bits) - 4607182418800017408.0
+		val *= 2.220446049250313e-16
+		return val
+	} $else {
+		mut bits := u32(0)
+		unsafe { C.memcpy(&bits, &x, sizeof(f32)) }
+		mut val := Real(bits) - 1065353216.0
+		val *= 1.1920928955078125e-7
+		return val
+	}
+}
+
+@[inline]
+pub fn approx_ln(x Real) Real {
+	return approx_log2(x) * to_real(0.69314718056)
 }
 
 @[inline; unsafe]
@@ -490,12 +513,24 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 				}
 			} $else {
 				for _ in 0 .. a.rows {
-					mut sum := to_real(0.0)
+					mut sum0 := to_real(0.0)
+					mut sum1 := to_real(0.0)
+					mut sum2 := to_real(0.0)
+					mut sum3 := to_real(0.0)
 					mut ptr_b := ptr_b_start
-					for k in 0 .. cols_a {
-						sum += ptr_a[k] * ptr_b[k]
+					mut k := 0
+					for k < cols_a - 3 {
+						sum0 += ptr_a[k] * ptr_b[k]
+						sum1 += ptr_a[k+1] * ptr_b[k+1]
+						sum2 += ptr_a[k+2] * ptr_b[k+2]
+						sum3 += ptr_a[k+3] * ptr_b[k+3]
+						k += 4
 					}
-					*ptr_res = sum
+					for k < cols_a {
+						sum0 += ptr_a[k] * ptr_b[k]
+						k++
+					}
+					*ptr_res = sum0 + sum1 + sum2 + sum3
 					ptr_res++
 					ptr_a += cols_a
 				}
@@ -582,12 +617,24 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 				}
 			} $else {
 				for _ in 0 .. a.rows {
-					mut sum := to_real(0.0)
+					mut sum0 := to_real(0.0)
+					mut sum1 := to_real(0.0)
+					mut sum2 := to_real(0.0)
+					mut sum3 := to_real(0.0)
 					mut ptr_b := ptr_b_start
-					for k in 0 .. cols_a {
-						sum += ptr_a[k] * ptr_b[k]
+					mut k := 0
+					for k < cols_a - 3 {
+						sum0 += ptr_a[k] * ptr_b[k]
+						sum1 += ptr_a[k+1] * ptr_b[k+1]
+						sum2 += ptr_a[k+2] * ptr_b[k+2]
+						sum3 += ptr_a[k+3] * ptr_b[k+3]
+						k += 4
 					}
-					*ptr_res += sum
+					for k < cols_a {
+						sum0 += ptr_a[k] * ptr_b[k]
+						k++
+					}
+					*ptr_res += sum0 + sum1 + sum2 + sum3
 					ptr_res++
 					ptr_a += cols_a
 				}
