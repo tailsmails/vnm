@@ -112,11 +112,11 @@ fn fast_exp(x Real) Real {
 	$if vnm_f64 ? {
 		mut cl_x := if x < to_real(-700.0) { to_real(-700.0) } else { x }
 		cl_x = if cl_x > to_real(700.0) { to_real(700.0) } else { cl_x }
-		fb := cl_x * to_real(1442695.0408889634)
+		fb := cl_x * to_real(6497320494453281.7)
 		mut bits := u64(0)
 		bits = u64(i64(fb) + 4607182418800017408)
 		mut res := Real(0.0)
-		unsafe { C.memcpy(&res, &bits, sizeof(Real)) }
+		unsafe { res = *(&Real(voidptr(&bits))) }
 		return res
 	} $else {
 		mut cl_x := if x < to_real(-88.0) { to_real(-88.0) } else { x }
@@ -125,7 +125,7 @@ fn fast_exp(x Real) Real {
 		mut bits := u32(0)
 		bits = u32(int(fb) + 1065353216)
 		mut res := Real(0.0)
-		unsafe { C.memcpy(&res, &bits, sizeof(Real)) }
+		unsafe { res = *(&Real(voidptr(&bits))) }
 		return res
 	}
 }
@@ -135,7 +135,7 @@ fn approx_sigmoid(x Real) Real {
 	$if (arm64 || aarch64) && !vnm_f64 ? {
 		return C.approx_sigmoid_neon(x)
 	}
-	abs_x := if x < to_real(0.0) { to_real(0.0) - x } else { x }
+	abs_x := if x < to_real(0.0) { -x } else { x }
 	return to_real(0.5) + (to_real(0.5) * x) / (to_real(1.0) + abs_x)
 }
 
@@ -144,24 +144,31 @@ fn approx_tanh(x Real) Real {
 	$if (arm64 || aarch64) && !vnm_f64 ? {
 		return C.approx_tanh_neon(x)
 	}
-	abs_x := if x < to_real(0.0) { to_real(0.0) - x } else { x }
+	abs_x := if x < to_real(0.0) { -x } else { x }
 	return x / (to_real(1.0) + abs_x)
 }
 
 @[inline]
 fn approx_inv_sqrt(x Real) Real {
 	$if vnm_f64 ? {
-		return to_real(1.0) / math.sqrt(x)
+		mut xhalf := to_real(0.5) * x
+		mut i := u64(0)
+		unsafe { i = *(&u64(voidptr(&x))) }
+		i = 0x5fe6eb50c7b537a9 - (i >> 1)
+		mut y := to_real(0.0)
+		unsafe { y = *(&Real(voidptr(&i))) }
+		y = y * (to_real(1.5) - xhalf * y * y)
+		return y
 	} $else {
 		$if arm64 || aarch64 {
 			return C.approx_inv_sqrt_neon(x)
 		}
 		mut xhalf := to_real(0.5) * x
 		mut i := u32(0)
-		unsafe { C.memcpy(&i, &x, sizeof(Real)) }
+		unsafe { i = *(&u32(voidptr(&x))) }
 		i = 0x5f3759df - (i >> 1)
 		mut y := to_real(0.0)
-		unsafe { C.memcpy(&y, &i, sizeof(Real)) }
+		unsafe { y = *(&Real(voidptr(&i))) }
 		y = y * (to_real(1.5) - xhalf * y * y)
 		return y
 	}
@@ -173,7 +180,8 @@ pub fn approx_gelu(x Real) Real {
 	const_2 := to_real(0.0356774)
 	half := to_real(0.5)
 	one := to_real(1.0)
-	inner := const_1 * x + const_2 * x * x * x
+	x_sq := x * x
+	inner := x * (const_1 + const_2 * x_sq)
 	return half * x * (one + approx_tanh(inner))
 }
 
@@ -181,13 +189,13 @@ pub fn approx_gelu(x Real) Real {
 pub fn approx_log2(x Real) Real {
 	$if vnm_f64 ? {
 		mut bits := u64(0)
-		unsafe { C.memcpy(&bits, &x, sizeof(f64)) }
+		unsafe { bits = *(&u64(voidptr(&x))) }
 		mut val := Real(bits) - 4607182418800017408.0
 		val *= 2.220446049250313e-16
 		return val
 	} $else {
 		mut bits := u32(0)
-		unsafe { C.memcpy(&bits, &x, sizeof(f32)) }
+		unsafe { bits = *(&u32(voidptr(&x))) }
 		mut val := Real(bits) - 1065353216.0
 		val *= 1.1920928955078125e-7
 		return val
@@ -206,19 +214,53 @@ pub fn softmax_row_inplace(mut data &Real, len int) {
 	}
 	unsafe {
 		mut max_val := data[0]
-		for i in 1 .. len {
+		mut i := 1
+		for i < len - 3 {
+			v0 := data[i]
+			v1 := data[i+1]
+			v2 := data[i+2]
+			v3 := data[i+3]
+			if v0 > max_val { max_val = v0 }
+			if v1 > max_val { max_val = v1 }
+			if v2 > max_val { max_val = v2 }
+			if v3 > max_val { max_val = v3 }
+			i += 4
+		}
+		for i < len {
 			if data[i] > max_val {
 				max_val = data[i]
 			}
+			i++
 		}
+		
 		mut sum := to_real(0.0)
-		for i in 0 .. len {
-			data[i] = fast_exp(data[i] - max_val)
-			sum += data[i]
+		mut j := 0
+		for j < len - 3 {
+			data[j] = fast_exp(data[j] - max_val)
+			data[j+1] = fast_exp(data[j+1] - max_val)
+			data[j+2] = fast_exp(data[j+2] - max_val)
+			data[j+3] = fast_exp(data[j+3] - max_val)
+			sum += data[j] + data[j+1] + data[j+2] + data[j+3]
+			j += 4
 		}
+		for j < len {
+			data[j] = fast_exp(data[j] - max_val)
+			sum += data[j]
+			j++
+		}
+		
 		inv_sum := to_real(1.0) / sum
-		for i in 0 .. len {
-			data[i] *= inv_sum
+		mut k := 0
+		for k < len - 3 {
+			data[k] *= inv_sum
+			data[k+1] *= inv_sum
+			data[k+2] *= inv_sum
+			data[k+3] *= inv_sum
+			k += 4
+		}
+		for k < len {
+			data[k] *= inv_sum
+			k++
 		}
 	}
 }
@@ -405,12 +447,16 @@ fn matmul_worker(args MatmulArgs) {
 				mut ptr_res := &args.res.data[offset_res]
 				mut ptr_b := &args.b.data[offset_b]
 				mut j := 0
-				for j < cols_b - 3 {
+				for j < cols_b - 7 {
 					ptr_res[j] += val_a * ptr_b[j]
 					ptr_res[j+1] += val_a * ptr_b[j+1]
 					ptr_res[j+2] += val_a * ptr_b[j+2]
 					ptr_res[j+3] += val_a * ptr_b[j+3]
-					j += 4
+					ptr_res[j+4] += val_a * ptr_b[j+4]
+					ptr_res[j+5] += val_a * ptr_b[j+5]
+					ptr_res[j+6] += val_a * ptr_b[j+6]
+					ptr_res[j+7] += val_a * ptr_b[j+7]
+					j += 8
 				}
 				for j < cols_b {
 					ptr_res[j] += val_a * ptr_b[j]
@@ -517,20 +563,28 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 					mut sum1 := to_real(0.0)
 					mut sum2 := to_real(0.0)
 					mut sum3 := to_real(0.0)
+					mut sum4 := to_real(0.0)
+					mut sum5 := to_real(0.0)
+					mut sum6 := to_real(0.0)
+					mut sum7 := to_real(0.0)
 					mut ptr_b := ptr_b_start
 					mut k := 0
-					for k < cols_a - 3 {
+					for k < cols_a - 7 {
 						sum0 += ptr_a[k] * ptr_b[k]
 						sum1 += ptr_a[k+1] * ptr_b[k+1]
 						sum2 += ptr_a[k+2] * ptr_b[k+2]
 						sum3 += ptr_a[k+3] * ptr_b[k+3]
-						k += 4
+						sum4 += ptr_a[k+4] * ptr_b[k+4]
+						sum5 += ptr_a[k+5] * ptr_b[k+5]
+						sum6 += ptr_a[k+6] * ptr_b[k+6]
+						sum7 += ptr_a[k+7] * ptr_b[k+7]
+						k += 8
 					}
 					for k < cols_a {
 						sum0 += ptr_a[k] * ptr_b[k]
 						k++
 					}
-					*ptr_res = sum0 + sum1 + sum2 + sum3
+					*ptr_res = (sum0 + sum1 + sum2 + sum3) + (sum4 + sum5 + sum6 + sum7)
 					ptr_res++
 					ptr_a += cols_a
 				}
@@ -551,12 +605,16 @@ fn matmul_serial_inplace(a Matrix, b Matrix, mut res Matrix) {
 				mut ptr_res := &res.data[offset_res]
 				mut ptr_b := &b.data[offset_b]
 				mut j := 0
-				for j < cols_b - 3 {
+				for j < cols_b - 7 {
 					ptr_res[j] += val_a * ptr_b[j]
 					ptr_res[j+1] += val_a * ptr_b[j+1]
 					ptr_res[j+2] += val_a * ptr_b[j+2]
 					ptr_res[j+3] += val_a * ptr_b[j+3]
-					j += 4
+					ptr_res[j+4] += val_a * ptr_b[j+4]
+					ptr_res[j+5] += val_a * ptr_b[j+5]
+					ptr_res[j+6] += val_a * ptr_b[j+6]
+					ptr_res[j+7] += val_a * ptr_b[j+7]
+					j += 8
 				}
 				for j < cols_b {
 					ptr_res[j] += val_a * ptr_b[j]
@@ -621,20 +679,28 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 					mut sum1 := to_real(0.0)
 					mut sum2 := to_real(0.0)
 					mut sum3 := to_real(0.0)
+					mut sum4 := to_real(0.0)
+					mut sum5 := to_real(0.0)
+					mut sum6 := to_real(0.0)
+					mut sum7 := to_real(0.0)
 					mut ptr_b := ptr_b_start
 					mut k := 0
-					for k < cols_a - 3 {
+					for k < cols_a - 7 {
 						sum0 += ptr_a[k] * ptr_b[k]
 						sum1 += ptr_a[k+1] * ptr_b[k+1]
 						sum2 += ptr_a[k+2] * ptr_b[k+2]
 						sum3 += ptr_a[k+3] * ptr_b[k+3]
-						k += 4
+						sum4 += ptr_a[k+4] * ptr_b[k+4]
+						sum5 += ptr_a[k+5] * ptr_b[k+5]
+						sum6 += ptr_a[k+6] * ptr_b[k+6]
+						sum7 += ptr_a[k+7] * ptr_b[k+7]
+						k += 8
 					}
 					for k < cols_a {
 						sum0 += ptr_a[k] * ptr_b[k]
 						k++
 					}
-					*ptr_res += sum0 + sum1 + sum2 + sum3
+					*ptr_res += (sum0 + sum1 + sum2 + sum3) + (sum4 + sum5 + sum6 + sum7)
 					ptr_res++
 					ptr_a += cols_a
 				}
@@ -650,12 +716,16 @@ fn matmul_add_inplace(a Matrix, b Matrix, mut res Matrix) {
 				mut ptr_res := &res.data[offset_res]
 				mut ptr_b := &b.data[offset_b]
 				mut j := 0
-				for j < cols_b - 3 {
+				for j < cols_b - 7 {
 					ptr_res[j] += val_a * ptr_b[j]
 					ptr_res[j+1] += val_a * ptr_b[j+1]
 					ptr_res[j+2] += val_a * ptr_b[j+2]
 					ptr_res[j+3] += val_a * ptr_b[j+3]
-					j += 4
+					ptr_res[j+4] += val_a * ptr_b[j+4]
+					ptr_res[j+5] += val_a * ptr_b[j+5]
+					ptr_res[j+6] += val_a * ptr_b[j+6]
+					ptr_res[j+7] += val_a * ptr_b[j+7]
+					j += 8
 				}
 				for j < cols_b {
 					ptr_res[j] += val_a * ptr_b[j]
@@ -958,26 +1028,77 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 			len := layer.last_output.data.len
 			match layer.activation_type {
 				.sigmoid {
-					for i in 0 .. len {
+					mut i := 0
+					for i < len - 3 {
+						val0 := ptr_res[i] + ptr_bias[i]
+						val1 := ptr_res[i+1] + ptr_bias[i+1]
+						val2 := ptr_res[i+2] + ptr_bias[i+2]
+						val3 := ptr_res[i+3] + ptr_bias[i+3]
+						
+						ptr_res[i] = approx_sigmoid(val0)
+						ptr_res[i+1] = approx_sigmoid(val1)
+						ptr_res[i+2] = approx_sigmoid(val2)
+						ptr_res[i+3] = approx_sigmoid(val3)
+						i += 4
+					}
+					for i < len {
 						val := ptr_res[i] + ptr_bias[i]
 						ptr_res[i] = approx_sigmoid(val)
+						i++
 					}
 				}
 				.relu {
-					for i in 0 .. len {
+					mut i := 0
+					for i < len - 3 {
+						val0 := ptr_res[i] + ptr_bias[i]
+						val1 := ptr_res[i+1] + ptr_bias[i+1]
+						val2 := ptr_res[i+2] + ptr_bias[i+2]
+						val3 := ptr_res[i+3] + ptr_bias[i+3]
+						
+						ptr_res[i] = if val0 > to_real(0.0) { val0 } else { to_real(0.0) }
+						ptr_res[i+1] = if val1 > to_real(0.0) { val1 } else { to_real(0.0) }
+						ptr_res[i+2] = if val2 > to_real(0.0) { val2 } else { to_real(0.0) }
+						ptr_res[i+3] = if val3 > to_real(0.0) { val3 } else { to_real(0.0) }
+						i += 4
+					}
+					for i < len {
 						val := ptr_res[i] + ptr_bias[i]
 						ptr_res[i] = if val > to_real(0.0) { val } else { to_real(0.0) }
+						i++
 					}
 				}
 				.tanh {
-					for i in 0 .. len {
+					mut i := 0
+					for i < len - 3 {
+						val0 := ptr_res[i] + ptr_bias[i]
+						val1 := ptr_res[i+1] + ptr_bias[i+1]
+						val2 := ptr_res[i+2] + ptr_bias[i+2]
+						val3 := ptr_res[i+3] + ptr_bias[i+3]
+						
+						ptr_res[i] = approx_tanh(val0)
+						ptr_res[i+1] = approx_tanh(val1)
+						ptr_res[i+2] = approx_tanh(val2)
+						ptr_res[i+3] = approx_tanh(val3)
+						i += 4
+					}
+					for i < len {
 						val := ptr_res[i] + ptr_bias[i]
 						ptr_res[i] = approx_tanh(val)
+						i++
 					}
 				}
 				.linear {
-					for i in 0 .. len {
+					mut i := 0
+					for i < len - 3 {
 						ptr_res[i] = ptr_res[i] + ptr_bias[i]
+						ptr_res[i+1] = ptr_res[i+1] + ptr_bias[i+1]
+						ptr_res[i+2] = ptr_res[i+2] + ptr_bias[i+2]
+						ptr_res[i+3] = ptr_res[i+3] + ptr_bias[i+3]
+						i += 4
+					}
+					for i < len {
+						ptr_res[i] = ptr_res[i] + ptr_bias[i]
+						i++
 					}
 				}
 			}
