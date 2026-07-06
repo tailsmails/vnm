@@ -786,6 +786,19 @@ pub fn attention_forward_step(q Matrix, k Matrix, v Matrix, mut scores Matrix, m
 	}
 }
 
+pub type CustomLayerForwardFn = fn (mut l Layer, input Matrix) Matrix
+pub type CustomLayerBackwardFn = fn (mut l Layer, next_delta Matrix) Matrix
+
+fn dummy_layer_forward(mut l Layer, input Matrix) Matrix {
+	_ = input
+	return l.last_output
+}
+
+fn dummy_layer_backward(mut l Layer, next_delta Matrix) Matrix {
+	_ = next_delta
+	return l.delta
+}
+
 pub struct Layer {
 pub mut:
 	weights         Matrix
@@ -806,6 +819,9 @@ pub mut:
 	is_rnn          bool
 	hidden_weights  Matrix
 	prev_hidden     Matrix
+	is_custom       bool
+	custom_forward  CustomLayerForwardFn = dummy_layer_forward
+	custom_backward CustomLayerBackwardFn = dummy_layer_backward
 }
 
 pub fn (mut l Layer) free() {
@@ -823,6 +839,47 @@ pub fn (mut l Layer) free() {
 	l.prev_hidden.free()
 }
 
+pub type LossComputeFn = fn (output Matrix, target Matrix) Real
+pub type LossGradientFn = fn (output Matrix, target Matrix, mut grad Matrix)
+
+fn dummy_loss_compute(output Matrix, target Matrix) Real {
+	_ = output
+	_ = target
+	return to_real(0.0)
+}
+
+fn dummy_loss_gradient(output Matrix, target Matrix, mut grad Matrix) {
+	_ = output
+	_ = target
+	_ = grad
+}
+
+pub struct LossFunction {
+pub:
+	compute  LossComputeFn = dummy_loss_compute
+	gradient LossGradientFn = dummy_loss_gradient
+}
+
+fn mse_compute(output Matrix, target Matrix) Real {
+	mut sum := to_real(0.0)
+	for i in 0 .. output.data.len {
+		diff := output.data[i] - target.data[i]
+		sum += diff * diff
+	}
+	return sum
+}
+
+fn mse_gradient(output Matrix, target Matrix, mut grad Matrix) {
+	for i in 0 .. output.data.len {
+		grad.data[i] = output.data[i] - target.data[i]
+	}
+}
+
+pub const loss_mse = LossFunction{
+	compute: mse_compute
+	gradient: mse_gradient
+}
+
 pub struct NeuralNetwork {
 pub mut:
 	layers    []Layer
@@ -830,6 +887,7 @@ pub mut:
 	normalize bool = true
 	means     []Real
 	stds      []Real
+	loss_fn   LossFunction = loss_mse
 }
 
 pub fn (mut nn NeuralNetwork) free() {
@@ -992,6 +1050,10 @@ pub fn new_sequential(optimizer OptimizerType) Sequential {
 	}
 }
 
+pub fn (mut s Sequential) set_loss_function(loss LossFunction) {
+	s.net.loss_fn = loss
+}
+
 pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationType, dropout_rate f64, is_rnn bool) {
 	s.net.layers << Layer{
 		weights: new_random_matrix(output_size, input_size)
@@ -1023,6 +1085,7 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 		} else {
 			new_matrix(1, 1)
 		}
+		is_custom: false
 	}
 }
 
@@ -1054,6 +1117,36 @@ pub fn (mut s Sequential) add_custom(input_size int, output_size int, custom_act
 		} else {
 			new_matrix(1, 1)
 		}
+		is_custom: false
+	}
+}
+
+pub fn (mut s Sequential) add_custom_layer(input_size int, output_size int, forward CustomLayerForwardFn, backward CustomLayerBackwardFn) {
+	s.net.layers << Layer{
+		weights: new_random_matrix(output_size, input_size)
+		biases: new_matrix(output_size, 1)
+		activation_type: .linear
+		custom_act: CustomActivation{
+			forward: dummy_act
+			derivative: dummy_act
+		}
+		last_input: new_matrix(input_size, 1)
+		last_output: new_matrix(output_size, 1)
+		delta: new_matrix(output_size, 1)
+		grad_w: new_matrix(output_size, input_size)
+		m_w: new_matrix(output_size, input_size)
+		v_w: new_matrix(output_size, input_size)
+		m_b: new_matrix(output_size, 1)
+		v_b: new_matrix(output_size, 1)
+		beta1_t: to_real(1.0)
+		beta2_t: to_real(1.0)
+		dropout_rate: 0.0
+		is_rnn: false
+		hidden_weights: new_matrix(1, 1)
+		prev_hidden: new_matrix(1, 1)
+		is_custom: true
+		custom_forward: forward
+		custom_backward: backward
 	}
 }
 
@@ -1120,6 +1213,7 @@ pub fn (s &Sequential) save(path string) ! {
 		b.write_matrix(layer.biases)
 		b.write_matrix(layer.hidden_weights)
 		b.write_matrix(layer.prev_hidden)
+		b.write_bool(layer.is_custom)
 	}
 	mut f := os.create(path)!
 	defer { f.close() }
@@ -1183,6 +1277,7 @@ pub fn load_sequential(path string) !Sequential {
 		biases := r.read_matrix()
 		hidden_weights := r.read_matrix()
 		prev_hidden := r.read_matrix()
+		is_custom := r.read_bool()
 		input_size := weights.cols
 		output_size := weights.rows
 		layers << Layer{
@@ -1207,6 +1302,9 @@ pub fn load_sequential(path string) !Sequential {
 			is_rnn: is_rnn
 			hidden_weights: hidden_weights
 			prev_hidden: prev_hidden
+			is_custom: is_custom
+			custom_forward: dummy_layer_forward
+			custom_backward: dummy_layer_backward
 		}
 	}
 	return Sequential{
@@ -1349,6 +1447,13 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 				prev_layer := &nn.layers[l - 1]
 				copy_real(&layer.last_input.data[0], &prev_layer.last_output.data[0], layer.last_input.data.len)
 			}
+			if layer.is_custom {
+				layer.last_output = layer.custom_forward(mut *layer, layer.last_input)
+				if layer.is_rnn {
+					copy_real(&layer.prev_hidden.data[0], &layer.last_output.data[0], layer.last_output.data.len)
+				}
+				continue
+			}
 			matmul_inplace(layer.weights, layer.last_input, mut layer.last_output)
 			if layer.is_rnn {
 				matmul_add_inplace(layer.hidden_weights, layer.prev_hidden, mut layer.last_output)
@@ -1487,138 +1592,149 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 		nn.forward_pass(input, !is_normalized)!
 		mut output_layer := &nn.layers[nn.layers.len - 1]
 		mut step_loss := to_real(0.0)
+		target_matrix := Matrix{
+			rows: target.data.len
+			cols: 1
+			data: target.data
+		}
+		mut loss_grad := new_matrix(output_layer.last_output.rows, output_layer.last_output.cols)
+		nn.loss_fn.gradient(output_layer.last_output, target_matrix, mut loss_grad)
+		step_loss = nn.loss_fn.compute(output_layer.last_output, target_matrix)
+		
 		mut ptr_delta := &output_layer.delta.data[0]
 		mut ptr_out := &output_layer.last_output.data[0]
-		mut ptr_target := &target.data[0]
+		mut ptr_grad := &loss_grad.data[0]
 		len := output_layer.delta.data.len
 		match output_layer.activation_type {
 			.sigmoid {
 				for i in 0 .. len {
-					error_val := ptr_out[i] - ptr_target[i]
-					step_loss += error_val * error_val
-					ptr_delta[i] = error_val * (ptr_out[i] * (to_real(1.0) - ptr_out[i]))
+					ptr_delta[i] = ptr_grad[i] * (ptr_out[i] * (to_real(1.0) - ptr_out[i]))
 				}
 			}
 			.relu {
 				for i in 0 .. len {
-					error_val := ptr_out[i] - ptr_target[i]
-					step_loss += error_val * error_val
-					ptr_delta[i] = if ptr_out[i] > to_real(0.0) { error_val } else { to_real(0.0) }
+					ptr_delta[i] = if ptr_out[i] > to_real(0.0) { ptr_grad[i] } else { to_real(0.0) }
 				}
 			}
 			.tanh {
 				for i in 0 .. len {
-					error_val := ptr_out[i] - ptr_target[i]
-					step_loss += error_val * error_val
-					ptr_delta[i] = error_val * (to_real(1.0) - (ptr_out[i] * ptr_out[i]))
+					ptr_delta[i] = ptr_grad[i] * (to_real(1.0) - (ptr_out[i] * ptr_out[i]))
 				}
 			}
 			.linear {
 				for i in 0 .. len {
-					error_val := ptr_out[i] - ptr_target[i]
-					step_loss += error_val * error_val
-					ptr_delta[i] = error_val
+					ptr_delta[i] = ptr_grad[i]
 				}
 			}
 			.custom {
 				for i in 0 .. len {
-					error_val := ptr_out[i] - ptr_target[i]
-					step_loss += error_val * error_val
-					ptr_delta[i] = error_val * output_layer.custom_act.derivative(ptr_out[i])
+					ptr_delta[i] = ptr_grad[i] * output_layer.custom_act.derivative(ptr_out[i])
 				}
 			}
 		}
 		for l := nn.layers.len - 1; l >= 0; l-- {
 			mut current_layer := &nn.layers[l]
-			matmul_transpose_b_inplace(current_layer.delta, current_layer.last_input, mut current_layer.grad_w)
-			if l > 0 {
-				mut prev_layer := &nn.layers[l - 1]
-				matmul_transpose_a_inplace(current_layer.weights, current_layer.delta, mut prev_layer.delta)
-				mut ptr_next := &prev_layer.delta.data[0]
-				mut ptr_prev_out := &prev_layer.last_output.data[0]
-				len_prev := prev_layer.delta.data.len
-				match prev_layer.activation_type {
-					.sigmoid {
-						for i in 0 .. len_prev {
-							ptr_next[i] = ptr_next[i] * (ptr_prev_out[i] * (to_real(1.0) - ptr_prev_out[i]))
+			if current_layer.is_custom {
+				if l > 0 {
+					mut prev_layer := &nn.layers[l - 1]
+					prev_layer.delta = current_layer.custom_backward(mut *current_layer, current_layer.delta)
+				} else {
+					_ = current_layer.custom_backward(mut *current_layer, current_layer.delta)
+				}
+			} else {
+				matmul_transpose_b_inplace(current_layer.delta, current_layer.last_input, mut current_layer.grad_w)
+				if l > 0 {
+					mut prev_layer := &nn.layers[l - 1]
+					matmul_transpose_a_inplace(current_layer.weights, current_layer.delta, mut prev_layer.delta)
+					mut ptr_next := &prev_layer.delta.data[0]
+					mut ptr_prev_out := &prev_layer.last_output.data[0]
+					len_prev := prev_layer.delta.data.len
+					match prev_layer.activation_type {
+						.sigmoid {
+							for i in 0 .. len_prev {
+								ptr_next[i] = ptr_next[i] * (ptr_prev_out[i] * (to_real(1.0) - ptr_prev_out[i]))
+							}
 						}
-					}
-					.relu {
-						for i in 0 .. len_prev {
-							ptr_next[i] = if ptr_prev_out[i] > to_real(0.0) { ptr_next[i] } else { to_real(0.0) }
+						.relu {
+							for i in 0 .. len_prev {
+								ptr_next[i] = if ptr_prev_out[i] > to_real(0.0) { ptr_next[i] } else { to_real(0.0) }
+							}
 						}
-					}
-					.tanh {
-						for i in 0 .. len_prev {
-							ptr_next[i] = ptr_next[i] * (to_real(1.0) - (ptr_prev_out[i] * ptr_prev_out[i]))
+						.tanh {
+							for i in 0 .. len_prev {
+								ptr_next[i] = ptr_next[i] * (to_real(1.0) - (ptr_prev_out[i] * ptr_prev_out[i]))
+							}
 						}
-					}
-					.linear {}
-					.custom {
-						for i in 0 .. len_prev {
-							ptr_next[i] = ptr_next[i] * prev_layer.custom_act.derivative(ptr_prev_out[i])
+						.linear {}
+						.custom {
+							for i in 0 .. len_prev {
+								ptr_next[i] = ptr_next[i] * prev_layer.custom_act.derivative(ptr_prev_out[i])
+							}
 						}
 					}
 				}
 			}
-			if _likely_(nn.optimizer == .adam) {
-				beta1 := to_real(0.9)
-				beta2 := to_real(0.999)
-				mut eps_sq := to_real(0.0)
-				$if vnm_f64 ? {
-					eps_sq = to_real(1e-12)
-				} $else {
-					eps_sq = to_real(1e-8)
-				}
-				current_layer.beta1_t *= beta1
-				current_layer.beta2_t *= beta2
-				bias_correction1 := to_real(1.0) - current_layer.beta1_t
-				bias_correction2 := to_real(1.0) - current_layer.beta2_t
-				mut ptr_w := &current_layer.weights.data[0]
-				mut ptr_g := &current_layer.grad_w.data[0]
-				mut ptr_mw := &current_layer.m_w.data[0]
-				mut ptr_vw := &current_layer.v_w.data[0]
-				one_minus_beta1 := to_real(1.0) - beta1
-				one_minus_beta2 := to_real(1.0) - beta2
-				step_size := lr / bias_correction1
-				inv_bias_corr2 := to_real(1.0) / bias_correction2
-				len_w := current_layer.weights.data.len
-				for i in 0 .. len_w {
-					mw_val := beta1 * ptr_mw[i] + one_minus_beta1 * ptr_g[i]
-					vw_val := beta2 * ptr_vw[i] + one_minus_beta2 * ptr_g[i] * ptr_g[i]
-					ptr_mw[i] = mw_val
-					ptr_vw[i] = vw_val
-					v_hat := vw_val * inv_bias_corr2
-					ptr_w[i] -= step_size * mw_val * approx_inv_sqrt(v_hat + eps_sq)
-				}
-				mut ptr_b := &current_layer.biases.data[0]
-				mut ptr_d := &current_layer.delta.data[0]
-				mut ptr_mb := &current_layer.m_b.data[0]
-				mut ptr_vb := &current_layer.v_b.data[0]
-				len_b := current_layer.biases.data.len
-				for i in 0 .. len_b {
-					mb_val := beta1 * ptr_mb[i] + one_minus_beta1 * ptr_d[i]
-					vb_val := beta2 * ptr_vb[i] + one_minus_beta2 * ptr_d[i] * ptr_d[i]
-					ptr_mb[i] = mb_val
-					ptr_vb[i] = vb_val
-					v_hat_b := vb_val * inv_bias_corr2
-					ptr_b[i] -= step_size * mb_val * approx_inv_sqrt(v_hat_b + eps_sq)
-				}
-			} else {
-				mut ptr_w := &current_layer.weights.data[0]
-				mut ptr_g := &current_layer.grad_w.data[0]
-				len_w := current_layer.weights.data.len
-				for i in 0 .. len_w {
-					ptr_w[i] -= lr * ptr_g[i]
-				}
-				mut ptr_b := &current_layer.biases.data[0]
-				mut ptr_d := &current_layer.delta.data[0]
-				len_b := current_layer.biases.data.len
-				for i in 0 .. len_b {
-					ptr_b[i] -= lr * ptr_d[i]
+			if current_layer.weights.data.len > 0 {
+				if _likely_(nn.optimizer == .adam) {
+					beta1 := to_real(0.9)
+					beta2 := to_real(0.999)
+					mut eps_sq := to_real(0.0)
+					$if vnm_f64 ? {
+						eps_sq = to_real(1e-12)
+					} $else {
+						eps_sq = to_real(1e-8)
+					}
+					current_layer.beta1_t *= beta1
+					current_layer.beta2_t *= beta2
+					bias_correction1 := to_real(1.0) - current_layer.beta1_t
+					bias_correction2 := to_real(1.0) - current_layer.beta2_t
+					mut ptr_w := &current_layer.weights.data[0]
+					mut ptr_g := &current_layer.grad_w.data[0]
+					mut ptr_mw := &current_layer.m_w.data[0]
+					mut ptr_vw := &current_layer.v_w.data[0]
+					one_minus_beta1 := to_real(1.0) - beta1
+					one_minus_beta2 := to_real(1.0) - beta2
+					step_size := lr / bias_correction1
+					inv_bias_corr2 := to_real(1.0) / bias_correction2
+					len_w := current_layer.weights.data.len
+					for i in 0 .. len_w {
+						mw_val := beta1 * ptr_mw[i] + one_minus_beta1 * ptr_g[i]
+						vw_val := beta2 * ptr_vw[i] + one_minus_beta2 * ptr_g[i] * ptr_g[i]
+						ptr_mw[i] = mw_val
+						ptr_vw[i] = vw_val
+						v_hat := vw_val * inv_bias_corr2
+						ptr_w[i] -= step_size * mw_val * approx_inv_sqrt(v_hat + eps_sq)
+					}
+					mut ptr_b := &current_layer.biases.data[0]
+					mut ptr_d := &current_layer.delta.data[0]
+					mut ptr_mb := &current_layer.m_b.data[0]
+					mut ptr_vb := &current_layer.v_b.data[0]
+					len_b := current_layer.biases.data.len
+					for i in 0 .. len_b {
+						mb_val := beta1 * ptr_mb[i] + one_minus_beta1 * ptr_d[i]
+						vb_val := beta2 * ptr_vb[i] + one_minus_beta2 * ptr_d[i] * ptr_d[i]
+						ptr_mb[i] = mb_val
+						ptr_vb[i] = vb_val
+						v_hat_b := vb_val * inv_bias_corr2
+						ptr_b[i] -= step_size * mb_val * approx_inv_sqrt(v_hat_b + eps_sq)
+					}
+				} else {
+					mut ptr_w := &current_layer.weights.data[0]
+					mut ptr_g := &current_layer.grad_w.data[0]
+					len_w := current_layer.weights.data.len
+					for i in 0 .. len_w {
+						ptr_w[i] -= lr * ptr_g[i]
+					}
+					mut ptr_b := &current_layer.biases.data[0]
+					mut ptr_d := &current_layer.delta.data[0]
+					len_b := current_layer.biases.data.len
+					for i in 0 .. len_b {
+						ptr_b[i] -= lr * ptr_d[i]
+					}
 				}
 			}
 		}
+		loss_grad.free()
 		return step_loss
 	}
 }
