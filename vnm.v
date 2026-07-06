@@ -31,13 +31,18 @@ $if (arm64 || aarch64) && !vnm_f64 ? {
 
 fn C.memcpy(dest voidptr, src voidptr, n usize) voidptr
 
+const size_of_int = 4
+const size_of_f64 = 8
+
 $if vnm_f64 ? {
 	pub type Real = f64
 	pub type Fnn = f64
+	const size_of_real = 8
 	@[inline] pub fn to_real(val f64) Real { return Real(val) }
 } $else {
 	pub type Real = f32
 	pub type Fnn = f32
+	const size_of_real = 4
 	@[inline] pub fn to_real(val f64) Real { return Real(val) }
 }
 
@@ -299,6 +304,12 @@ pub enum ActivationType {
 pub enum OptimizerType {
 	sgd
 	adam
+}
+
+pub enum QuantizationType {
+	none
+	int8
+	int16
 }
 
 pub struct Tensor {
@@ -843,9 +854,140 @@ pub fn (mut nn NeuralNetwork) free() {
 	}
 }
 
+struct ByteBuffer {
+mut:
+	data []u8
+	pos  int
+}
+
+fn new_byte_buffer(cap int) ByteBuffer {
+	return ByteBuffer{
+		data: []u8{len: 0, cap: cap}
+		pos: 0
+	}
+}
+
+fn (mut b ByteBuffer) write_u8(val u8) {
+	b.data << val
+}
+
+fn (mut b ByteBuffer) write_bool(val bool) {
+	b.data << if val { u8(1) } else { u8(0) }
+}
+
+fn (mut b ByteBuffer) write_int(val int) {
+	unsafe {
+		ptr := &val
+		b.write_bytes(ptr, size_of_int)
+	}
+}
+
+fn (mut b ByteBuffer) write_f64(val f64) {
+	unsafe {
+		ptr := &val
+		b.write_bytes(ptr, size_of_f64)
+	}
+}
+
+fn (mut b ByteBuffer) write_real(val Real) {
+	unsafe {
+		ptr := &val
+		b.write_bytes(ptr, size_of_real)
+	}
+}
+
+fn (mut b ByteBuffer) write_bytes(ptr voidptr, len int) {
+	unsafe {
+		u8_ptr := &u8(ptr)
+		for i in 0 .. len {
+			b.data << u8_ptr[i]
+		}
+	}
+}
+
+fn (mut b ByteBuffer) write_matrix(m Matrix) {
+	b.write_int(m.rows)
+	b.write_int(m.cols)
+	unsafe {
+		if m.data.len > 0 {
+			b.write_bytes(&m.data[0], m.data.len * size_of_real)
+		}
+	}
+}
+
+struct ByteReader {
+	data []u8
+mut:
+	pos  int
+}
+
+fn (mut r ByteReader) read_u8() u8 {
+	val := r.data[r.pos]
+	r.pos++
+	return val
+}
+
+fn (mut r ByteReader) read_bool() bool {
+	return r.read_u8() == 1
+}
+
+fn (mut r ByteReader) read_int() int {
+	unsafe {
+		mut val := 0
+		ptr := &u8(&val)
+		for i in 0 .. size_of_int {
+			ptr[i] = r.data[r.pos + i]
+		}
+		r.pos += size_of_int
+		return val
+	}
+}
+
+fn (mut r ByteReader) read_f64() f64 {
+	unsafe {
+		mut val := 0.0
+		ptr := &u8(&val)
+		for i in 0 .. size_of_f64 {
+			ptr[i] = r.data[r.pos + i]
+		}
+		r.pos += size_of_f64
+		return val
+	}
+}
+
+fn (mut r ByteReader) read_real() Real {
+	unsafe {
+		mut val := Real(0.0)
+		ptr := &u8(&val)
+		for i in 0 .. size_of_real {
+			ptr[i] = r.data[r.pos + i]
+		}
+		r.pos += size_of_real
+		return val
+	}
+}
+
+fn (mut r ByteReader) read_matrix() Matrix {
+	rows := r.read_int()
+	cols := r.read_int()
+	mut m := new_matrix(rows, cols)
+	unsafe {
+		if m.data.len > 0 {
+			ptr := &u8(&m.data[0])
+			len_bytes := m.data.len * size_of_real
+			for i in 0 .. len_bytes {
+				ptr[i] = r.data[r.pos + i]
+			}
+			r.pos += len_bytes
+		}
+	}
+	return m
+}
+
 pub struct Sequential {
 pub mut:
-	net NeuralNetwork
+	net          NeuralNetwork
+	quantization QuantizationType = .none
 }
 
 pub fn new_sequential(optimizer OptimizerType) Sequential {
@@ -930,16 +1072,159 @@ pub fn (mut s Sequential) free() {
 	s.net.free()
 }
 
+pub fn (mut s Sequential) apply_quantization() {
+	if s.quantization == .none {
+		return
+	}
+	limit := if s.quantization == .int8 { to_real(127.0) } else { to_real(32767.0) }
+	for mut layer in s.net.layers {
+		mut max_w := to_real(0.0)
+		for val in layer.weights.data {
+			abs_val := if val < to_real(0.0) { -val } else { val }
+			if abs_val > max_w {
+				max_w = abs_val
+			}
+		}
+		if max_w > to_real(0.0) {
+			scale := max_w / limit
+			for i in 0 .. layer.weights.data.len {
+				q_val := math.round(f64(layer.weights.data[i] / scale))
+				mut clipped := if q_val > f64(limit) { f64(limit) } else { q_val }
+				clipped = if clipped < f64(-limit) { f64(-limit) } else { clipped }
+				layer.weights.data[i] = to_real(clipped) * scale
+			}
+		}
+	}
+}
+
 pub fn (s &Sequential) save(path string) ! {
-	data := json.encode(s.net)
-	os.write_file(path, data)!
+	mut b := new_byte_buffer(1024)
+	b.write_u8(u8(`V`))
+	b.write_u8(u8(`N`))
+	b.write_u8(u8(`M`))
+	b.write_u8(u8(`B`))
+	b.write_bool(s.net.normalize)
+	b.write_u8(u8(s.net.optimizer))
+	b.write_u8(u8(s.quantization))
+	b.write_int(s.net.means.len)
+	unsafe {
+		if s.net.means.len > 0 {
+			b.write_bytes(&s.net.means[0], s.net.means.len * size_of_real)
+		}
+	}
+	b.write_int(s.net.stds.len)
+	unsafe {
+		if s.net.stds.len > 0 {
+			b.write_bytes(&s.net.stds[0], s.net.stds.len * size_of_real)
+		}
+	}
+	b.write_int(s.net.layers.len)
+	for layer in s.net.layers {
+		b.write_u8(u8(layer.activation_type))
+		b.write_bool(layer.is_rnn)
+		b.write_f64(layer.dropout_rate)
+		b.write_matrix(layer.weights)
+		b.write_matrix(layer.biases)
+		b.write_matrix(layer.hidden_weights)
+		b.write_matrix(layer.prev_hidden)
+	}
+	mut f := os.create(path)!
+	defer { f.close() }
+	f.write(b.data)!
 }
 
 pub fn load_sequential(path string) !Sequential {
-	data := os.read_file(path)!
-	net := json.decode(NeuralNetwork, data)!
+	data := os.read_bytes(path)!
+	if data.len < 4 {
+		return error("Invalid binary file: Too short.")
+	}
+	mut r := ByteReader{ data: data, pos: 0 }
+	m0 := r.read_u8()
+	m1 := r.read_u8()
+	m2 := r.read_u8()
+	m3 := r.read_u8()
+	if m0 != u8(`V`) || m1 != u8(`N`) || m2 != u8(`M`) || m3 != u8(`B`) {
+		return error("Invalid binary file: Magic bytes mismatch.")
+	}
+	normalize := r.read_bool()
+	mut optimizer := OptimizerType.sgd
+	mut quantization := QuantizationType.none
+	unsafe {
+		optimizer = OptimizerType(r.read_u8())
+		quantization = QuantizationType(r.read_u8())
+	}
+	means_len := r.read_int()
+	mut means := []Real{len: means_len}
+	unsafe {
+		if means_len > 0 {
+			ptr := &u8(&means[0])
+			len_bytes := means_len * size_of_real
+			for i in 0 .. len_bytes {
+				ptr[i] = r.data[r.pos + i]
+			}
+			r.pos += len_bytes
+		}
+	}
+	stds_len := r.read_int()
+	mut stds := []Real{len: stds_len}
+	unsafe {
+		if stds_len > 0 {
+			ptr := &u8(&stds[0])
+			len_bytes := stds_len * size_of_real
+			for i in 0 .. len_bytes {
+				ptr[i] = r.data[r.pos + i]
+			}
+			r.pos += len_bytes
+		}
+	}
+	layers_len := r.read_int()
+	mut layers := []Layer{}
+	for _ in 0 .. layers_len {
+		mut act_type := ActivationType.sigmoid
+		unsafe {
+			act_type = ActivationType(r.read_u8())
+		}
+		is_rnn := r.read_bool()
+		dropout_rate := r.read_f64()
+		weights := r.read_matrix()
+		biases := r.read_matrix()
+		hidden_weights := r.read_matrix()
+		prev_hidden := r.read_matrix()
+		input_size := weights.cols
+		output_size := weights.rows
+		layers << Layer{
+			weights: weights
+			biases: biases
+			activation_type: act_type
+			custom_act: CustomActivation{
+				forward: dummy_act
+				derivative: dummy_act
+			}
+			last_input: new_matrix(input_size, 1)
+			last_output: new_matrix(output_size, 1)
+			delta: new_matrix(output_size, 1)
+			grad_w: new_matrix(output_size, input_size)
+			m_w: new_matrix(output_size, input_size)
+			v_w: new_matrix(output_size, input_size)
+			m_b: new_matrix(output_size, 1)
+			v_b: new_matrix(output_size, 1)
+			beta1_t: to_real(1.0)
+			beta2_t: to_real(1.0)
+			dropout_rate: dropout_rate
+			is_rnn: is_rnn
+			hidden_weights: hidden_weights
+			prev_hidden: prev_hidden
+		}
+	}
 	return Sequential{
-		net: net
+		net: NeuralNetwork{
+			layers: layers
+			optimizer: optimizer
+			normalize: normalize
+			means: means
+			stds: stds
+		}
+		quantization: quantization
 	}
 }
 
@@ -1020,6 +1305,7 @@ pub fn (mut s Sequential) train(inputs []Tensor, targets []Tensor, epochs int, l
 	unsafe {
 		s.net.train_with_decay(inputs, targets, epochs, to_real(lr), to_real(1.0), 0)!
 	}
+	s.apply_quantization()
 }
 
 @[manualfree]
@@ -1028,6 +1314,7 @@ pub fn (mut s Sequential) train_with_decay(inputs []Tensor, targets []Tensor, ep
 		s.net.train_with_decay(inputs, targets, epochs, to_real(lr), to_real(decay_rate),
 			decay_steps)!
 	}
+	s.apply_quantization()
 }
 
 @[manualfree; unsafe]
