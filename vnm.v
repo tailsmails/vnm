@@ -3,7 +3,6 @@ module vnm
 import math
 import rand
 import os
-import json
 import runtime
 
 #flag -Ofast
@@ -62,12 +61,6 @@ pub:
 struct DummyJsonStruct {
 	v int
 }
-
-const unused_math_silencer = math.sqrt(0.0)
-const unused_rand_silencer = rand.int()
-const unused_os_silencer = os.args.len
-const unused_json_silencer = json.encode(DummyJsonStruct{v: 0})
-const unused_runtime_silencer = runtime.nr_cpus()
 
 const block_size = 64
 
