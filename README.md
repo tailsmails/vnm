@@ -3,16 +3,16 @@
 ## Overview
 `vnm` is a minimalist, compiled neural network library written in the V programming language. It is designed for multi-variable regression and classification tasks, focusing on resource-constrained micro-architectures, mobile environments (such as Termux), embedded systems (IoT), and desktop platforms.
 
-By bypassing automatic garbage collection and utilizing explicit manual memory management, `vnm` compiles directly to native C. This minimizes runtime engine overhead, producing incredibly small binaries that enable ultra-low latency single-vector inference and training directly on CPU cores.
+By bypassing automatic garbage collection and utilizing explicit manual memory management, `vnm` compiles directly to native C. This minimizes runtime engine overhead, producing incredibly small binaries that enable low-latency single-vector inference and training directly on CPU cores.
 
 ---
 
 ## Key Features
 
 *   **Hybrid C-Interop Architecture:** Integrates platform-specific C helper routines (`vnm_arm64.c`) compiled alongside V source files. On ARM64 platforms (Apple Silicon, Raspberry Pi, Android/Termux), this bypasses V's lexical compiler scanner constraints to directly compile ARM NEON SIMD intrinsics (such as `vmlaq_f32` and `vaddvq_f32` in `neon_dot_product_arm64`), accelerating matrix-vector calculations.
-*   **Ultra-Low Latency Inference:** The inference path (where `cols_b == 1`) is heavily optimized to use hardware-specific SIMD dot-products directly. On modern ARM64 CPUs, a single forward pass for a standard compact model takes **sub-50 microseconds**, allowing for tens of thousands of inferences per second.
-*   **Micro-Binary & L1 I-Cache Efficiency:** Unlike heavy frameworks (e.g., TFLite, ONNX), `vnm` has **zero external dependencies** and no computational graph parsing overhead. The resulting stripped binary is typically under 300 KB. This allows the entire inference engine to fit inside the CPU's L1 Instruction Cache (I-Cache), eliminating RAM bottlenecks and resulting in **zero cold-start time**.
-*   **Zero-Overhead Silent Mode:** Supports a compile-time `-d vnm_silent` flag that completely strips out all standard output, I/O operations, and dynamic string allocations/interpolations during the hot loops, dedicating 100% of CPU cycles to pure math.
+*   **Low-Latency Inference:** The inference path (where `cols_b == 1`) is optimized to use hardware-specific SIMD dot-products directly. On modern ARM64 CPUs, a single forward pass for a standard compact model typically executes in the sub-50 microsecond range, allowing for thousands of inferences per second.
+*   **Micro-Binary & L1 I-Cache Efficiency:** Unlike heavy frameworks (e.g., TFLite, ONNX), `vnm` has **zero external dependencies** and no computational graph parsing overhead. The resulting stripped binary is typically under 300 KB. This allows the entire inference engine to fit inside the CPU's L1 Instruction Cache (I-Cache), reducing RAM bottlenecks and minimizing cold-start latencies.
+*   **Zero-Overhead Silent Mode:** Supports a compile-time `-d vnm_silent` flag that strips out standard output, I/O operations, and dynamic string allocations/interpolations during hot loops, dedicating 100% of CPU cycles to pure math.
 *   **Compiler-Friendly Loop Structure:** Dot-product operations in the sequential matrix multiplication routines avoid manual, hardcoded loop unrolling. Instead, they use simple sequential loops, allowing C compiler backends (GCC/Clang) to leverage native SIMD vectorization (SSE, AVX2, AVX-512) and issue Fused Multiply-Add (FMA) instructions where applicable.
 *   **Fast Inverse Square Root (Software & Hardware):** Features multiple fast reciprocal square root implementations for the Adam optimizer. On ARM64 architectures, it can utilize native hardware-assisted instructions (`frsqrte` with GCC-compatible `%w` 32-bit register operand constraints in C inline assembly). For other architectures, it falls back to a software-level floating-point bit-manipulation hack (Quake III approach) implemented in C.
 *   **Schraudolph's Exponential Approximation:** Integrates Schraudolph's floating-point bit-manipulation algorithm for fast $e^x$ approximation in C (`fast_exp_c`). This speeds up the evaluation of complex transcendental mathematical activations like `approx_sigmoid` and `approx_tanh`.
@@ -26,8 +26,10 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 *   **Flexible Compile-Time Precision (`Real` Alias):** Features compile-time precision mapping. Single-precision `f32` is employed as the default mode to maximize SSE2/NEON vectorization throughput and reduce memory bandwidth requirements. Passing `-d vnm_f64` at compile-time promotes the engine to double-precision `f64`.
 *   **Consistent API Boundaries:** To preserve clean syntax, creator APIs (`vector`, `scalar`, `new_tensor`) accept standard V float arrays (`[]f64`). The library automatically maps these inputs to the active engine precision (`Real`) during tensor instantiation.
 *   **RNN & Sequence Modeling Support:** Features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing.
-*   **Dropout Regularization:** Includes a dropout mechanism with drop masks to randomly deactivate neurons during the training phase, effectively preventing overfitting in complex architectures.
-*   **JSON Model Serialization (Save/Load):** Fully trained models-including network topology, weights, biases, and normalization parameters-can be serialized and deserialized to/from disk via standard JSON configuration with zero external dependencies.
+*   **Dropout Regularization:** Includes a dropout mechanism with drop masks to randomly deactivate neurons during the training phase, helping prevent overfitting in complex architectures.
+*   **Extensible Custom Activation Interface:** Provides a modular API (`CustomActivation`) allowing developers to pass custom forward mathematical functions and their corresponding derivatives via function pointers at runtime (e.g., LeakyReLU, ELU), ensuring high extensibility without modifying the core library.
+*   **Symmetric Weight Quantization (INT8 & INT16):** Integrates post-training symmetric quantization. It dynamically analyzes weight scales per layer to compress floating-point parameters to discrete `int8` or `int16` ranges, enabling memory footprint reduction and fast integer arithmetic mapping on edge hardware.
+*   **Custom Binary Model Serialization (Save/Load):** Fully trained models—including topology, weights, biases, optimizer settings, quantization mode, and normalization parameters (`means`, `stds`)—are serialized directly into a custom-structured binary format (`VNMB`). This avoids the parsing and memory overhead of text-based formats like JSON, maintaining an extremely small disk footprint.
 *   **Z-Score Input Normalization:** Features built-in Z-Score input standardization and Target Min-Max scaling. The model computes, stores, and serializes feature means, standard deviations, and boundaries during training, applying them to future predictions.
 *   **Compile-Time Conditional Safety (`-d vnm_safe`):** Dual-mode compilation ensures versatility. You can compile with size-validation, dimension mismatch checks, and zero-division assertions during development, or completely prune these assertions at compile-time for minimized runtime overhead in production.
 *   **He (Kaiming) Initialization:** Built-in uniform random initialization ($\sqrt{6 / n_{\text{in}}}$) optimized specifically for stable training, preventing gradient explosion and dead neurons.
@@ -40,7 +42,7 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 ### Core Architecture
 1.  **Tensor & Matrix Layer:** Features a multi-dimensional `Tensor` interface and flat `Matrix` layouts utilizing raw pointers, flexible precision `Real` arrays, and manual memory deallocation routines.
 2.  **Sequential API:** Employs a linear configuration interface (`model.add()`) to specify layers, mapping input/output sizes, activation types, dropout rates, and RNN toggles.
-3.  **Configurable Activations:** Supports multiple distinct activation functions (`sigmoid`, `relu`, `tanh`, and `linear`), automatically handling their derivatives during backpropagation.
+3.  **Configurable Activations:** Supports multiple distinct activation functions (`sigmoid`, `relu`, `tanh`, `linear`, and `custom`), automatically handling their derivatives during backpropagation.
 
 ---
 
@@ -71,19 +73,27 @@ v -cc clang -prod -d no_bounds_checking main.v -o main
 
 ## Minimal Code Example
 
-Here is how easily you can define, train, save, and run predictions using `vnm` and its Adam optimizer:
+Here is a comprehensive example demonstrating how to define a custom activation function, train a network, serialize the trained state to a binary file, deserialize it back, apply symmetric INT8 quantization, and run low-latency predictions:
 
 ```v
 import vnm
-import time
 import math
 import os
+
+// 1. Define custom activation functions (e.g., LeakyReLU)
+fn my_leaky_relu(x vnm.Real) vnm.Real {
+	return if x > 0 { x } else { vnm.Real(0.01) * x }
+}
+
+fn my_leaky_relu_derivative(y vnm.Real) vnm.Real {
+	return if y > 0 { vnm.Real(1.0) } else { vnm.Real(0.01) }
+}
 
 fn main() {
 	mut inputs := []vnm.Tensor{}
 	mut targets := []vnm.Tensor{}
 
-	// XOR Dataset (accepts standard []f64 literals natively)
+	// Training Dataset (logical OR gate)
 	inputs << vnm.vector([0.0, 0.0])
 	targets << vnm.vector([0.0])
 
@@ -94,36 +104,42 @@ fn main() {
 	targets << vnm.vector([1.0])
 
 	inputs << vnm.vector([1.0, 1.0])
-	targets << vnm.vector([0.0])
+	targets << vnm.vector([1.0])
 	
-	println('Building model architecture...')
-	// Use Adam optimizer for faster convergence
+	println('Building model architecture with Custom Activation...')
 	mut model := vnm.new_sequential(.adam)
 	
-	// add(input_size, output_size, activation, dropout_rate, is_rnn)
-	model.add(2, 8, .relu, 0.0, false)
-	model.add(8, 1, .sigmoid, 0.0, false)
-	model.set_normalize(false)
+	leaky_act := vnm.CustomActivation{
+		forward: my_leaky_relu
+		derivative: my_leaky_relu_derivative
+	}
 	
-	println('Starting training (1000 epochs)...')
-	sw := time.new_stopwatch()
+	// Add custom activation layer
+	model.add_custom(2, 4, leaky_act, 0.0, false)
+	model.add(4, 1, .sigmoid, 0.0, false)
+	model.set_normalize(true)
 	
-	// train_with_decay(inputs, targets, epochs, learning_rate, decay_rate, decay_steps)
-	model.train_with_decay(inputs, targets, 1000, 0.05, 1.0, 0) or {
+	println('Starting training (600 epochs)...')
+	model.train(inputs, targets, 600, 0.05) or {
 		println('Training failed: ${err}')
 		return
 	}
-
-	elapsed := sw.elapsed()
-	println('\nTraining completed in: ${elapsed}')
 	
-	// Save the model state to disk
-	model_file := 'xor_model.json'
+	// Serialize model state to disk in compact binary format
+	model_file := 'or_model.vnm'
 	model.save(model_file) or { panic(err) }
-	println('Model saved to ${model_file}')
+	println('Model saved to ${model_file} (Binary Format)')
 
-	// Load model to verify JSON Serialization
+	// Load model to verify Binary Deserialization
 	mut loaded_model := vnm.load_sequential(model_file) or { panic(err) }
+	
+	// Restore custom activation function pointers (cannot be serialized)
+	loaded_model.net.layers[0].custom_act = leaky_act
+
+	// Apply Post-Training Symmetric INT8 Quantization
+	loaded_model.quantization = .int8
+	loaded_model.apply_quantization()
+	println('Symmetric INT8 Quantization successfully applied.')
 
 	test_cases := [
 		[0.0, 0.0],
@@ -132,16 +148,13 @@ fn main() {
 		[1.0, 1.0],
 	]
 
-	println('\nRunning Predictions (using loaded model):')
+	println('\nRunning Predictions (using loaded & quantized model):')
 	for test in test_cases {
 		pred_tensor := loaded_model.predict(vnm.vector(test)) or { continue }
-		output := pred_tensor.data[0]
-		expected := int(test[0]) ^ int(test[1])
+		output := pred_tensor.get(0)
+		expected := if test[0] > 0.0 || test[1] > 0.0 { 1.0 } else { 0.0 }
 		
-		rounded_output := int(math.round(output))
-		status := if rounded_output == expected { 'PASS' } else { 'FAIL' }
-		
-		println(' Input: [${int(test[0])}, ${int(test[1])}]  =>  Predicted: ${output:6.4f}  |  Expected: ${expected}  [${status}]')
+		println(' Input: [${test[0]:.1f}, ${test[1]:.1f}]  =>  Predicted Probability: ${output:6.4f}  |  Expected: ${expected:.1f}')
 		pred_tensor.free()
 	}
 	
@@ -214,4 +227,4 @@ This library is developed for educational purposes, academic research, and edge-
 ---
 
 ## License
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![License](https://img.shields.io/badge/License-MIT-red.svg)
