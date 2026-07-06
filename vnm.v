@@ -19,6 +19,18 @@ $if vnm_f16 ? || ((arm64 || aarch64) && !vnm_f32 ? && !vnm_f64 ?) {
 	#flag -DVNM_F16
 }
 
+$if vnm_i32 ? {
+	#flag -DVNM_I32
+}
+
+$if vnm_i16 ? {
+	#flag -DVNM_I16
+}
+
+$if vnm_i8 ? {
+	#flag -DVNM_I8
+}
+
 #include "vnm_arm64.c"
 
 $if (arm64 || aarch64) && !vnm_f64 ? && !vnm_i32 ? && !vnm_i16 ? && !vnm_i8 ? {
