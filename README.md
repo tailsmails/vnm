@@ -10,6 +10,12 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 ## Key Features
 
 *   **Zero-Copy Memory-Mapped Inference (`mmap`):** Supports rapid model loading via the `load_sequential_mapped` interface on POSIX-compliant systems. Weights are mapped directly from storage to virtual memory pages, bypassing standard heap copies. To optimize memory consumption during inference, auxiliary training-specific matrices (such as `delta`, `grad_w`, `m_w`, `v_w`, `m_b`, `v_b`) are initialized as empty (0-byte) structures, reducing initialization latency to sub-millisecond ranges.
+*   **Flexible Compile-Time Multi-Type System (`Real` Alias):** Supports compile-time precision mapping to accommodate various target micro-architectures. Single-precision `f32` is employed as the default mode to optimize SSE2/NEON vectorization throughput. By passing specific compile-time flags, the internal data engine type `Real` can be promoted or demoted to multiple types:
+    *   `-d vnm_f64`: Double-precision floating-point (`f64`) for strict numeric simulations.
+    *   `-d vnm_f16`: Half-precision floating-point (`f16` emulated fallback) for storage layout evaluations.
+    *   `-d vnm_i32`: 32-bit signed integer math (`i32`).
+    *   `-d vnm_i16`: 16-bit signed integer math (`i16`).
+    *   `-d vnm_i8`: 8-bit signed integer math (`i8`) for strict edge-computing simulation.
 *   **Hybrid C-Interop Architecture:** Integrates platform-specific C helper routines (`vnm_arm64.c`) compiled alongside V source files. On ARM64 platforms (Apple Silicon, Raspberry Pi, Android/Termux), this bypasses V's lexical compiler scanner constraints to directly compile ARM NEON SIMD intrinsics (such as `vmlaq_f32` and `vaddvq_f32` in `neon_dot_product_arm64`), accelerating matrix-vector calculations.
 *   **Low-Latency Inference:** The inference path (where `cols_b == 1`) is optimized to use hardware-specific SIMD dot-products directly. On modern ARM64 CPUs, a single forward pass for a standard compact model executes in microsecond ranges, allowing for highly efficient real-time evaluation.
 *   **Micro-Binary & L1 I-Cache Efficiency:** Unlike heavy frameworks (e.g., TFLite, ONNX), `vnm` has **zero external dependencies** and no computational graph parsing overhead. The resulting stripped binary is typically under 300 KB. This allows the entire inference engine to fit inside the CPU's L1 Instruction Cache (I-Cache), reducing RAM bottlenecks and minimizing cold-start latencies.
@@ -23,7 +29,6 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 *   **Fallback Thresholds:** To prevent scheduling and context-switching overhead on smaller workloads, the library routes execution to a single-threaded path if the matrix has fewer than 64 rows, or during single-vector calculations (where `cols_b == 1`).
 *   **Advanced Optimizers (SGD & Adam):** Native support for both standard Stochastic Gradient Descent (SGD) and the **Adam** optimizer, featuring momentum, velocity, and bias correction (`beta1`, `beta2`) for stable convergence.
 *   **V Bounds Checking Bypass Option:** Supports bypassing V's implicit array bounds checking inside hot training loops and layer operations. By utilizing unsafe pointer indexing (`&training_inputs[0]`), the compiler translates loops directly into standard C pointer arithmetic.
-*   **Flexible Compile-Time Precision (`Real` Alias):** Features compile-time precision mapping. Single-precision `f32` is employed as the default mode to maximize SSE2/NEON vectorization throughput and reduce memory bandwidth requirements. Passing `-d vnm_f64` at compile-time promotes the engine to double-precision `f64`.
 *   **Consistent API Boundaries:** To preserve clean syntax, creator APIs (`vector`, `scalar`, `new_tensor`) accept standard V float arrays (`[]f64`). The library automatically maps these inputs to the active engine precision (`Real`) during tensor instantiation.
 *   **RNN & Sequence Modeling Support:** Features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing.
 *   **Dropout Regularization:** Includes a dropout mechanism with drop masks to randomly deactivate neurons during the training phase, helping prevent overfitting in complex architectures.
@@ -31,7 +36,7 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 *   **Extensible Custom Loss Function Interface:** Supports defining custom loss objectives (`LossFunction`) by providing custom compute and gradient evaluation routines via function pointers, allowing users to train networks using specialized objective functions (such as Mean Absolute Error/L1 Loss or Huber Loss).
 *   **Extensible Custom Layer Interface:** Allows developers to insert completely custom computational layers (`add_custom_layer`) into the execution pipeline by passing custom forward and backward mapping functions, enabling custom math or non-linear layer architectures without performance-degrading object-oriented abstractions.
 *   **Symmetric Weight Quantization (INT8 & INT16):** Integrates post-training symmetric quantization. It dynamically analyzes weight scales per layer to compress floating-point parameters to discrete `int8` or `int16` ranges, enabling memory footprint reduction and fast integer arithmetic mapping on edge hardware.
-*   **Custom Binary Model Serialization (Save/Load):** Fully trained models including topology, weights, biases, optimizer settings, quantization mode, and normalization parameters (`means`, `stds`) are serialized directly into a custom-structured binary format (`VNMB`). This avoids the parsing and memory overhead of text-based formats like JSON, maintaining an extremely small disk footprint.
+*   **Custom Binary Model Serialization (Save/Load):** Fully trained models—including topology, weights, biases, optimizer settings, quantization mode, and normalization parameters (`means`, `stds`)—are serialized directly into a custom-structured binary format (`VNMB`). This avoids the parsing and memory overhead of text-based formats like JSON, maintaining an extremely small disk footprint.
 *   **Z-Score Input Normalization:** Features built-in Z-Score input standardization and Target Min-Max scaling. The model computes, stores, and serializes feature means, standard deviations, and boundaries during training, applying them to future predictions.
 *   **Compile-Time Conditional Safety (`-d vnm_safe`):** Dual-mode compilation ensures versatility. You can compile with size-validation, dimension mismatch checks, and zero-division assertions during development, or completely prune these assertions at compile-time for minimized runtime overhead in production.
 *   **He (Kaiming) Initialization:** Built-in uniform random initialization ($\sqrt{6 / n_{\text{in}}}$) optimized specifically for stable training, preventing gradient explosion and dead neurons.
@@ -188,28 +193,41 @@ pkg update -y && pkg install -y git clang make && if ! command -v v >/dev/null 2
 
 ## Compilation Modes
 
-### 1. Safe & Debug Mode
-Compiles with compile-time conditional checks, bounds/dimension assertions, and verbose validation logging (defaults to default `f32` precision):
-```bash
-v -d vnm_safe -cc clang main.v -o main && ./main
-```
-
-### 2. Single-Precision (f32) Production Mode (Default)
+### 1. Default Mode (Single-Precision f32)
 Strips away all assertions, logs, and dimension checks at compile-time, maximizing compiler-level loop unrolling and SSE2/NEON hardware vectorization:
 ```bash
-v -cc clang -prod -d no_bounds_checking main.v -o main && ./main
+v -cc clang -prod -d no_bounds_checking main.v -o main
 ```
 
-### 3. Double-Precision (f64) Production Mode
-Promotes precision to double-precision `f64` for backward compatibility or strict high-precision simulations, while keeping all runtime allocation constraints intact:
+### 2. Multi-Type Compilation
+Allows mapping the computational core to various float and integer layouts at compile-time:
 ```bash
-v -d vnm_f64 -cc clang -prod -d no_bounds_checking main.v -o main && ./main
+# f64 Double-Precision Float Mode
+v -d vnm_f64 -cc clang -prod -d no_bounds_checking main.v -o main
+
+# f16 Half-Precision Float Mode (Simulated)
+v -d vnm_f16 -cc clang -prod -d no_bounds_checking main.v -o main
+
+# i32 Integer Mode
+v -d vnm_i32 -cc clang -prod -d no_bounds_checking main.v -o main
+
+# i16 Integer Mode
+v -d vnm_i16 -cc clang -prod -d no_bounds_checking main.v -o main
+
+# i8 Integer Mode
+v -d vnm_i8 -cc clang -prod -d no_bounds_checking main.v -o main
 ```
 
-### 4. Maximum Performance / Silent Mode
+### 3. Maximum Performance / Silent Mode
 Completely strips out all standard I/O (like `println`) and string allocations during runtime. Ideal for raw edge-inference, game engines, or Real-Time systems where determinism and zero-overhead are required:
 ```bash
-v -cc clang -prod -d no_bounds_checking -d vnm_silent main.v -o main && ./main
+v -cc clang -prod -d no_bounds_checking -d vnm_silent main.v -o main
+```
+
+### 4. Safe & Debug Mode
+Compiles with compile-time conditional checks, bounds/dimension assertions, and verbose validation logging:
+```bash
+v -d vnm_safe -cc clang main.v -o main
 ```
 
 ---
