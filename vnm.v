@@ -41,6 +41,19 @@ $if vnm_f64 ? {
 	@[inline] pub fn to_real(val f64) Real { return Real(val) }
 }
 
+pub type ActivationFn = fn (Real) Real
+pub type DerivativeFn = fn (Real) Real
+
+fn dummy_act(x Real) Real {
+	return x
+}
+
+pub struct CustomActivation {
+pub:
+	forward    ActivationFn = dummy_act
+	derivative DerivativeFn = dummy_act
+}
+
 struct DummyJsonStruct {
 	v int
 }
@@ -280,6 +293,7 @@ pub enum ActivationType {
 	relu
 	tanh
 	linear
+	custom
 }
 
 pub enum OptimizerType {
@@ -773,6 +787,7 @@ pub mut:
 	weights         Matrix
 	biases          Matrix
 	activation_type ActivationType
+	custom_act      CustomActivation
 	last_input      Matrix
 	last_output     Matrix
 	delta           Matrix
@@ -847,6 +862,41 @@ pub fn (mut s Sequential) add(input_size int, output_size int, act ActivationTyp
 		weights: new_random_matrix(output_size, input_size)
 		biases: new_matrix(output_size, 1)
 		activation_type: act
+		custom_act: CustomActivation{
+			forward: dummy_act
+			derivative: dummy_act
+		}
+		last_input: new_matrix(input_size, 1)
+		last_output: new_matrix(output_size, 1)
+		delta: new_matrix(output_size, 1)
+		grad_w: new_matrix(output_size, input_size)
+		m_w: new_matrix(output_size, input_size)
+		v_w: new_matrix(output_size, input_size)
+		m_b: new_matrix(output_size, 1)
+		v_b: new_matrix(output_size, 1)
+		beta1_t: to_real(1.0)
+		beta2_t: to_real(1.0)
+		dropout_rate: dropout_rate
+		is_rnn: is_rnn
+		hidden_weights: if is_rnn {
+			new_random_matrix(output_size, output_size)
+		} else {
+			new_matrix(1, 1)
+		}
+		prev_hidden: if is_rnn {
+			new_matrix(output_size, 1)
+		} else {
+			new_matrix(1, 1)
+		}
+	}
+}
+
+pub fn (mut s Sequential) add_custom(input_size int, output_size int, custom_act CustomActivation, dropout_rate f64, is_rnn bool) {
+	s.net.layers << Layer{
+		weights: new_random_matrix(output_size, input_size)
+		biases: new_matrix(output_size, 1)
+		activation_type: .custom
+		custom_act: custom_act
 		last_input: new_matrix(input_size, 1)
 		last_output: new_matrix(output_size, 1)
 		delta: new_matrix(output_size, 1)
@@ -1101,6 +1151,26 @@ fn (mut nn NeuralNetwork) forward_pass(input Tensor, perform_normalization bool)
 						i++
 					}
 				}
+				.custom {
+					mut i := 0
+					for i < len - 3 {
+						val0 := ptr_res[i] + ptr_bias[i]
+						val1 := ptr_res[i+1] + ptr_bias[i+1]
+						val2 := ptr_res[i+2] + ptr_bias[i+2]
+						val3 := ptr_res[i+3] + ptr_bias[i+3]
+						
+						ptr_res[i] = layer.custom_act.forward(val0)
+						ptr_res[i+1] = layer.custom_act.forward(val1)
+						ptr_res[i+2] = layer.custom_act.forward(val2)
+						ptr_res[i+3] = layer.custom_act.forward(val3)
+						i += 4
+					}
+					for i < len {
+						val := ptr_res[i] + ptr_bias[i]
+						ptr_res[i] = layer.custom_act.forward(val)
+						i++
+					}
+				}
 			}
 			if layer.is_rnn {
 				copy_real(&layer.prev_hidden.data[0], &layer.last_output.data[0], layer.last_output.data.len)
@@ -1170,6 +1240,13 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 					ptr_delta[i] = error_val
 				}
 			}
+			.custom {
+				for i in 0 .. len {
+					error_val := ptr_out[i] - ptr_target[i]
+					step_loss += error_val * error_val
+					ptr_delta[i] = error_val * output_layer.custom_act.derivative(ptr_out[i])
+				}
+			}
 		}
 		for l := nn.layers.len - 1; l >= 0; l-- {
 			mut current_layer := &nn.layers[l]
@@ -1197,6 +1274,11 @@ fn (mut nn NeuralNetwork) train_step_internal(input Tensor, target Tensor, lr Re
 						}
 					}
 					.linear {}
+					.custom {
+						for i in 0 .. len_prev {
+							ptr_next[i] = ptr_next[i] * prev_layer.custom_act.derivative(ptr_prev_out[i])
+						}
+					}
 				}
 			}
 			if _likely_(nn.optimizer == .adam) {
