@@ -1,9 +1,8 @@
-// .vmodules/vnm/vnm_arm64.c
-
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 
 #ifdef VNM_F16
   #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
@@ -11,14 +10,152 @@
   #endif
 #endif
 
-typedef float vnm_float_t;
+#if defined(VNM_I8)
+typedef int8_t vnm_real_t;
+#elif defined(VNM_I16)
+typedef int16_t vnm_real_t;
+#elif defined(VNM_I32)
+typedef int32_t vnm_real_t;
+#else
+typedef float vnm_real_t;
+#endif
 
-#if defined(VNM_F16) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+#if defined(VNM_I8)
 
-float neon_dot_product_arm64(const vnm_float_t* __restrict__ a, const vnm_float_t* __restrict__ b, int len) {
+float neon_dot_product_arm64(const int8_t* __restrict__ a, const int8_t* __restrict__ b, int len) {
     #if defined(__GNUC__) || defined(__clang__)
-    a = (const vnm_float_t*)__builtin_assume_aligned(a, 16);
-    b = (const vnm_float_t*)__builtin_assume_aligned(b, 16);
+    a = (const int8_t*)__builtin_assume_aligned(a, 16);
+    b = (const int8_t*)__builtin_assume_aligned(b, 16);
+    #endif
+
+    int32x4_t s0 = vdupq_n_s32(0);
+    int32x4_t s1 = vdupq_n_s32(0);
+    int i = 0;
+
+    #if defined(__ARM_FEATURE_DOTPROD)
+    if (len >= 32) {
+        for (; i <= len - 32; i += 32) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 64, 0, 0);
+            __builtin_prefetch(b + i + 64, 0, 0);
+            #endif
+            s0 = vdotq_s32(s0, vld1q_s8(a + i), vld1q_s8(b + i));
+            s1 = vdotq_s32(s1, vld1q_s8(a + i + 16), vld1q_s8(b + i + 16));
+        }
+        s0 = vaddq_s32(s0, s1);
+    }
+    #else
+    if (len >= 16) {
+        for (; i <= len - 16; i += 16) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 32, 0, 0);
+            __builtin_prefetch(b + i + 32, 0, 0);
+            #endif
+            int8x16_t va = vld1q_s8(a + i);
+            int8x16_t vb = vld1q_s8(b + i);
+            int16x8_t prod_l = vmull_s8(vget_low_s8(va), vget_low_s8(vb));
+            int16x8_t prod_h = vmull_high_s8(va, vb);
+            s0 = vpadalq_s16(s0, prod_l);
+            s1 = vpadalq_s16(s1, prod_h);
+        }
+        s0 = vaddq_s32(s0, s1);
+    }
+    #endif
+
+    for (; i <= len - 8; i += 8) {
+        int8x8_t va = vld1_s8(a + i);
+        int8x8_t vb = vld1_s8(b + i);
+        int16x8_t prod = vmull_s8(va, vb);
+        s0 = vpadalq_s16(s0, prod);
+    }
+
+    int32_t sum = vaddvq_s32(s0);
+    for (; i < len; i++) {
+        sum += (int32_t)a[i] * (int32_t)b[i];
+    }
+    return (float)sum;
+}
+
+#elif defined(VNM_I16)
+
+float neon_dot_product_arm64(const int16_t* __restrict__ a, const int16_t* __restrict__ b, int len) {
+    #if defined(__GNUC__) || defined(__clang__)
+    a = (const int16_t*)__builtin_assume_aligned(a, 16);
+    b = (const int16_t*)__builtin_assume_aligned(b, 16);
+    #endif
+
+    int32x4_t s0 = vdupq_n_s32(0);
+    int32x4_t s1 = vdupq_n_s32(0);
+    int i = 0;
+    if (len >= 16) {
+        for (; i <= len - 16; i += 16) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 32, 0, 0);
+            __builtin_prefetch(b + i + 32, 0, 0);
+            #endif
+            int16x8_t va0 = vld1q_s16(a + i);
+            int16x8_t vb0 = vld1q_s16(b + i);
+            s0 = vmlal_s16(s0, vget_low_s16(va0), vget_low_s16(vb0));
+            s1 = vmlal_high_s16(s1, va0, vb0);
+
+            int16x8_t va1 = vld1q_s16(a + i + 8);
+            int16x8_t vb1 = vld1q_s16(b + i + 8);
+            s0 = vmlal_s16(s0, vget_low_s16(va1), vget_low_s16(vb1));
+            s1 = vmlal_high_s16(s1, va1, vb1);
+        }
+    }
+    for (; i <= len - 8; i += 8) {
+        int16x8_t va = vld1q_s16(a + i);
+        int16x8_t vb = vld1q_s16(b + i);
+        s0 = vmlal_s16(s0, vget_low_s16(va), vget_low_s16(vb));
+        s1 = vmlal_high_s16(s1, va, vb);
+    }
+    int32_t sum = vaddvq_s32(vaddq_s32(s0, s1));
+    for (; i < len; i++) {
+        sum += (int32_t)a[i] * (int32_t)b[i];
+    }
+    return (float)sum;
+}
+
+#elif defined(VNM_I32)
+
+float neon_dot_product_arm64(const int32_t* __restrict__ a, const int32_t* __restrict__ b, int len) {
+    #if defined(__GNUC__) || defined(__clang__)
+    a = (const int32_t*)__builtin_assume_aligned(a, 16);
+    b = (const int32_t*)__builtin_assume_aligned(b, 16);
+    #endif
+
+    int32x4_t s0 = vdupq_n_s32(0);
+    int32x4_t s1 = vdupq_n_s32(0);
+    int i = 0;
+    if (len >= 16) {
+        for (; i <= len - 16; i += 16) {
+            #if defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(a + i + 32, 0, 0);
+            __builtin_prefetch(b + i + 32, 0, 0);
+            #endif
+            s0 = vmlaq_s32(s0, vld1q_s32(a + i), vld1q_s32(b + i));
+            s1 = vmlaq_s32(s1, vld1q_s32(a + i + 4), vld1q_s32(b + i + 4));
+            s0 = vmlaq_s32(s0, vld1q_s32(a + i + 8), vld1q_s32(b + i + 8));
+            s1 = vmlaq_s32(s1, vld1q_s32(a + i + 12), vld1q_s32(b + i + 12));
+        }
+    }
+    for (; i <= len - 4; i += 4) {
+        s0 = vmlaq_s32(s0, vld1q_s32(a + i), vld1q_s32(b + i));
+    }
+    int32_t sum = vaddvq_s32(vaddq_s32(s0, s1));
+    for (; i < len; i++) {
+        sum += a[i] * b[i];
+    }
+    return (float)sum;
+}
+
+#elif defined(VNM_F16) && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+
+float neon_dot_product_arm64(const vnm_real_t* __restrict__ a, const vnm_real_t* __restrict__ b, int len) {
+    #if defined(__GNUC__) || defined(__clang__)
+    a = (const vnm_real_t*)__builtin_assume_aligned(a, 16);
+    b = (const vnm_real_t*)__builtin_assume_aligned(b, 16);
     #endif
     
     float16x8_t s0 = vdupq_n_f16(0.0f);
@@ -103,10 +240,10 @@ float neon_dot_product_arm64(const vnm_float_t* __restrict__ a, const vnm_float_
 
 #else
 
-float neon_dot_product_arm64(const vnm_float_t* __restrict__ a, const vnm_float_t* __restrict__ b, int len) {
+float neon_dot_product_arm64(const vnm_real_t* __restrict__ a, const vnm_real_t* __restrict__ b, int len) {
     #if defined(__GNUC__) || defined(__clang__)
-    a = (const vnm_float_t*)__builtin_assume_aligned(a, 16);
-    b = (const vnm_float_t*)__builtin_assume_aligned(b, 16);
+    a = (const vnm_real_t*)__builtin_assume_aligned(a, 16);
+    b = (const vnm_real_t*)__builtin_assume_aligned(b, 16);
     #endif
 
     float32x4_t s0 = vdupq_n_f32(0.0f);
@@ -198,14 +335,31 @@ float fast_max_neon(float a, float b) {
 }
 
 #else
-typedef float vnm_float_t;
 
-float neon_dot_product_arm64(const vnm_float_t* a, const vnm_float_t* b, int len) {
+#if defined(VNM_I8)
+typedef int8_t vnm_real_t;
+#elif defined(VNM_I16)
+typedef int16_t vnm_real_t;
+#elif defined(VNM_I32)
+typedef int32_t vnm_real_t;
+#else
+typedef float vnm_real_t;
+#endif
+
+float neon_dot_product_arm64(const vnm_real_t* a, const vnm_real_t* b, int len) {
+    #if defined(VNM_I8) || defined(VNM_I16) || defined(VNM_I32)
+    int32_t sum = 0;
+    for (int i = 0; i < len; i++) {
+        sum += (int32_t)a[i] * (int32_t)b[i];
+    }
+    return (float)sum;
+    #else
     float sum = 0.0f;
     for (int i = 0; i < len; i++) {
         sum += a[i] * b[i];
     }
     return sum;
+    #endif
 }
 
 float approx_sigmoid_neon(float x) {
