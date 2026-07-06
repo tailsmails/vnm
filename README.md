@@ -22,12 +22,13 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 *   **Fallback Thresholds:** To prevent scheduling and context-switching overhead on smaller workloads, the library routes execution to a single-threaded path if the matrix has fewer than 64 rows, or during single-vector calculations (where `cols_b == 1`).
 *   **Advanced Optimizers (SGD & Adam):** Native support for both standard Stochastic Gradient Descent (SGD) and the **Adam** optimizer, featuring momentum, velocity, and bias correction (`beta1`, `beta2`) for stable convergence.
 *   **V Bounds Checking Bypass Option:** Supports bypassing V's implicit array bounds checking inside hot training loops and layer operations. By utilizing unsafe pointer indexing (`&training_inputs[0]`), the compiler translates loops directly into standard C pointer arithmetic.
-*   **Loop Fusion:** Evaluates Mean Squared Error (MSE) loss and calculates the output layer's gradient delta ($\delta$) simultaneously in a single fused loop, reducing cache sweeps and memory bus traffic.
 *   **Flexible Compile-Time Precision (`Real` Alias):** Features compile-time precision mapping. Single-precision `f32` is employed as the default mode to maximize SSE2/NEON vectorization throughput and reduce memory bandwidth requirements. Passing `-d vnm_f64` at compile-time promotes the engine to double-precision `f64`.
 *   **Consistent API Boundaries:** To preserve clean syntax, creator APIs (`vector`, `scalar`, `new_tensor`) accept standard V float arrays (`[]f64`). The library automatically maps these inputs to the active engine precision (`Real`) during tensor instantiation.
 *   **RNN & Sequence Modeling Support:** Features native support for Recurrent Neural Networks (RNN). Layers can maintain hidden states and recurrent weights across sequence steps, enabling time-series and sequential data processing.
 *   **Dropout Regularization:** Includes a dropout mechanism with drop masks to randomly deactivate neurons during the training phase, helping prevent overfitting in complex architectures.
 *   **Extensible Custom Activation Interface:** Provides a modular API (`CustomActivation`) allowing developers to pass custom forward mathematical functions and their corresponding derivatives via function pointers at runtime (e.g., LeakyReLU, ELU), ensuring high extensibility without modifying the core library.
+*   **Extensible Custom Loss Function Interface:** Supports defining custom loss objectives (`LossFunction`) by providing custom compute and gradient evaluation routines via function pointers, allowing users to train networks using specialized objective functions (such as Mean Absolute Error/L1 Loss or Huber Loss).
+*   **Extensible Custom Layer Interface:** Allows developers to insert completely custom computational layers (`add_custom_layer`) into the execution pipeline by passing custom forward and backward mapping functions, enabling custom math or non-linear layer architectures without performance-degrading object-oriented abstractions.
 *   **Symmetric Weight Quantization (INT8 & INT16):** Integrates post-training symmetric quantization. It dynamically analyzes weight scales per layer to compress floating-point parameters to discrete `int8` or `int16` ranges, enabling memory footprint reduction and fast integer arithmetic mapping on edge hardware.
 *   **Custom Binary Model Serialization (Save/Load):** Fully trained models—including topology, weights, biases, optimizer settings, quantization mode, and normalization parameters (`means`, `stds`)—are serialized directly into a custom-structured binary format (`VNMB`). This avoids the parsing and memory overhead of text-based formats like JSON, maintaining an extremely small disk footprint.
 *   **Z-Score Input Normalization:** Features built-in Z-Score input standardization and Target Min-Max scaling. The model computes, stores, and serializes feature means, standard deviations, and boundaries during training, applying them to future predictions.
@@ -41,8 +42,8 @@ By bypassing automatic garbage collection and utilizing explicit manual memory m
 
 ### Core Architecture
 1.  **Tensor & Matrix Layer:** Features a multi-dimensional `Tensor` interface and flat `Matrix` layouts utilizing raw pointers, flexible precision `Real` arrays, and manual memory deallocation routines.
-2.  **Sequential API:** Employs a linear configuration interface (`model.add()`) to specify layers, mapping input/output sizes, activation types, dropout rates, and RNN toggles.
-3.  **Configurable Activations:** Supports multiple distinct activation functions (`sigmoid`, `relu`, `tanh`, `linear`, and `custom`), automatically handling their derivatives during backpropagation.
+2.  **Sequential API:** Employs a linear configuration interface (`model.add()`, `model.add_custom_layer()`) to specify layers, mapping input/output sizes, activation types, dropout rates, and custom mathematical mappings.
+3.  **Configurable Loss Functions & Activations:** Supports modular objective evaluation and backpropagation. It allows configuring different activations (`sigmoid`, `relu`, `tanh`, `linear`, `custom`) alongside flexible loss functions (`LossFunction`) to decouple target gradients from the structural network topology.
 
 ---
 
@@ -73,92 +74,96 @@ v -cc clang -prod -d no_bounds_checking main.v -o main
 
 ## Minimal Code Example
 
-Here is a comprehensive example demonstrating how to define a custom activation function, train a network, serialize the trained state to a binary file, deserialize it back, apply symmetric INT8 quantization, and run low-latency predictions:
+Here is a comprehensive example demonstrating how to define a custom L1 Loss function (Mean Absolute Error), insert a custom mathematical scaling layer, train the model, serialize and deserialize the state, and verify performance:
 
 ```v
 import vnm
-import math
 import os
 
-// 1. Define custom activation functions (e.g., LeakyReLU)
-fn my_leaky_relu(x vnm.Real) vnm.Real {
-	return if x > 0 { x } else { vnm.Real(0.01) * x }
+// 1. Define custom loss functions (Mean Absolute Error / L1 Loss)
+fn custom_l1_compute(output vnm.Matrix, target vnm.Matrix) vnm.Real {
+	mut sum := vnm.to_real(0.0)
+	for i in 0 .. output.data.len {
+		diff := output.data[i] - target.data[i]
+		sum += if diff < 0 { -diff } else { diff }
+	}
+	return sum
 }
 
-fn my_leaky_relu_derivative(y vnm.Real) vnm.Real {
-	return if y > 0 { vnm.Real(1.0) } else { vnm.Real(0.01) }
+fn custom_l1_gradient(output vnm.Matrix, target vnm.Matrix, mut grad vnm.Matrix) {
+	for i in 0 .. output.data.len {
+		diff := output.data[i] - target.data[i]
+		grad.data[i] = if diff > 0 { vnm.to_real(1.0) } else if diff < 0 { vnm.to_real(-1.0) } else { vnm.to_real(0.0) }
+	}
+}
+
+// 2. Define custom layer forward & backward routines (Scaling Layer)
+fn scaling_forward(mut l vnm.Layer, input vnm.Matrix) vnm.Matrix {
+	mut output := vnm.new_matrix(input.rows, input.cols)
+	for i in 0 .. input.data.len {
+		output.data[i] = input.data[i] * vnm.to_real(2.0)
+	}
+	l.last_output = output.clone()
+	return output
+}
+
+fn scaling_backward(mut l vnm.Layer, next_delta vnm.Matrix) vnm.Matrix {
+	mut prev_delta := vnm.new_matrix(next_delta.rows, next_delta.cols)
+	for i in 0 .. next_delta.data.len {
+		prev_delta.data[i] = next_delta.data[i] * vnm.to_real(2.0)
+	}
+	l.delta = prev_delta.clone()
+	return prev_delta
 }
 
 fn main() {
 	mut inputs := []vnm.Tensor{}
 	mut targets := []vnm.Tensor{}
 
-	// Training Dataset (logical OR gate)
-	inputs << vnm.vector([0.0, 0.0])
-	targets << vnm.vector([0.0])
+	inputs << vnm.vector([1.0, 2.0])
+	targets << vnm.vector([4.0, 8.0])
 
-	inputs << vnm.vector([0.0, 1.0])
-	targets << vnm.vector([1.0])
-
-	inputs << vnm.vector([1.0, 0.0])
-	targets << vnm.vector([1.0])
-
-	inputs << vnm.vector([1.0, 1.0])
-	targets << vnm.vector([1.0])
+	inputs << vnm.vector([2.0, 3.0])
+	targets << vnm.vector([8.0, 12.0])
 	
-	println('Building model architecture with Custom Activation...')
+	println('Building model architecture...')
 	mut model := vnm.new_sequential(.adam)
 	
-	leaky_act := vnm.CustomActivation{
-		forward: my_leaky_relu
-		derivative: my_leaky_relu_derivative
+	l1_loss := vnm.LossFunction{
+		compute: custom_l1_compute
+		gradient: custom_l1_gradient
 	}
+	model.set_loss_function(l1_loss)
 	
-	// Add custom activation layer
-	model.add_custom(2, 4, leaky_act, 0.0, false)
-	model.add(4, 1, .sigmoid, 0.0, false)
-	model.set_normalize(true)
+	// Add linear layer followed by our custom scaling layer
+	model.add(2, 2, .linear, 0.0, false)
+	model.add_custom_layer(2, 2, scaling_forward, scaling_backward)
+	model.set_normalize(false)
 	
-	println('Starting training (600 epochs)...')
-	model.train(inputs, targets, 600, 0.05) or {
+	println('Training model for 500 epochs...')
+	model.train(inputs, targets, 500, 0.01) or {
 		println('Training failed: ${err}')
 		return
 	}
 	
-	// Serialize model state to disk in compact binary format
-	model_file := 'or_model.vnm'
+	model_file := 'scaling_model.vnm'
 	model.save(model_file) or { panic(err) }
 	println('Model saved to ${model_file} (Binary Format)')
 
 	// Load model to verify Binary Deserialization
 	mut loaded_model := vnm.load_sequential(model_file) or { panic(err) }
+	loaded_model.set_loss_function(l1_loss)
 	
-	// Restore custom activation function pointers (cannot be serialized)
-	loaded_model.net.layers[0].custom_act = leaky_act
+	// Re-assign the function pointers after loading (cannot be serialized)
+	loaded_model.net.layers[1].custom_forward = scaling_forward
+	loaded_model.net.layers[1].custom_backward = scaling_backward
 
-	// Apply Post-Training Symmetric INT8 Quantization
-	loaded_model.quantization = .int8
-	loaded_model.apply_quantization()
-	println('Symmetric INT8 Quantization successfully applied.')
-
-	test_cases := [
-		[0.0, 0.0],
-		[0.0, 1.0],
-		[1.0, 0.0],
-		[1.0, 1.0],
-	]
-
-	println('\nRunning Predictions (using loaded & quantized model):')
-	for test in test_cases {
-		pred_tensor := loaded_model.predict(vnm.vector(test)) or { continue }
-		output := pred_tensor.get(0)
-		expected := if test[0] > 0.0 || test[1] > 0.0 { 1.0 } else { 0.0 }
-		
-		println(' Input: [${test[0]:.1f}, ${test[1]:.1f}]  =>  Predicted Probability: ${output:6.4f}  |  Expected: ${expected:.1f}')
-		pred_tensor.free()
-	}
+	println('\nRunning Predictions (using loaded model):')
+	pred_tensor := loaded_model.predict(inputs[0]) or { panic(err) }
+	println(' Input: [1.0, 2.0]  =>  Predicted output: [${pred_tensor.get(0):.4f}, ${pred_tensor.get(1):.4f}]  |  Expected: [4.0, 8.0]')
 	
 	// Manual Memory Cleanup
+	pred_tensor.free()
 	model.free()
 	loaded_model.free()
 	for mut t in inputs { t.free() }
@@ -215,7 +220,7 @@ v -cc clang -prod -d no_bounds_checking -d vnm_silent main.v -o main && ./main
 ---
 
 ## Log Interpretation
-*   **Mean Squared Loss:** Shows the mean squared error (MSE) value computed over the training dataset.
+*   **Mean Squared Loss:** Shows the error value computed over the training dataset.
 *   **Active LR:** Displays the current learning rate value, reflecting any step or exponential decay applied during training.
 *   **BLIND Generalization Test:** Evaluates the trained model on unseen parameters outside the training grid, printing the absolute error compared to the analytical expectations.
 
