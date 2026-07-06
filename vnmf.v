@@ -332,3 +332,41 @@ pub fn (f &FocusEngine) parse_topology() ![]u64 {
 	}
 	return offsets
 }
+
+pub fn (f &FocusEngine) prefetch_async(offset u64, length_bytes u64) {
+	spawn f.prefetch_worker(offset, length_bytes)
+}
+
+fn (f &FocusEngine) prefetch_worker(offset u64, length_bytes u64) {
+	f.prefetch(offset, length_bytes)
+}
+
+pub fn (f &FocusEngine) get_layer_sizes(offsets []u64) []u64 {
+	mut sizes := []u64{cap: offsets.len}
+	for i in 0 .. offsets.len {
+		if i < offsets.len - 1 {
+			sizes << offsets[i + 1] - offsets[i]
+		} else {
+			sizes << f.file_size - offsets[i]
+		}
+	}
+	return sizes
+}
+
+pub fn (f &FocusEngine) prefetch_layer(offsets []u64, sizes []u64, layer_idx int) {
+	if layer_idx >= 0 && layer_idx < offsets.len {
+		f.prefetch(offsets[layer_idx], sizes[layer_idx])
+	}
+}
+
+pub fn (f &FocusEngine) prefetch_layer_async(offsets []u64, sizes []u64, layer_idx int) {
+	if layer_idx >= 0 && layer_idx < offsets.len {
+		f.prefetch_async(offsets[layer_idx], sizes[layer_idx])
+	}
+}
+
+pub fn (f &FocusEngine) evict_layer(offsets []u64, sizes []u64, layer_idx int) {
+	if layer_idx >= 0 && layer_idx < offsets.len {
+		f.evict(offsets[layer_idx], sizes[layer_idx])
+	}
+}
