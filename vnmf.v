@@ -7,8 +7,11 @@ import os
 #include <unistd.h>
 #include <sys/stat.h>
 
-fn C.open(pathname &char, flags int, mode int) int
-fn C.close(fd int) int
+// fn C.open(pathname &char, flags int, mode int) int
+// fn C.close(fd int) int
+// are deprecated in the newest compiler vers :-|
+// does this mean 80% of my code is DUCKED?
+
 fn C.mmap(addr voidptr, length usize, prot int, flags int, fd int, offset i64) voidptr
 fn C.munmap(addr voidptr, length usize) int
 fn C.madvise(addr voidptr, length usize, advice int) int
