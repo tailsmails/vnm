@@ -31,7 +31,9 @@ $if vnm_i8 ? {
 	#flag -DVNM_I8
 }
 
-#include "vnm_arm64.c"
+$if arm64 {
+    #include "vnm_arm64.c"
+}
 
 $if (arm64 || aarch64) && !vnm_f64 ? && !vnm_i32 ? && !vnm_i16 ? && !vnm_i8 ? {
 	fn C.neon_dot_product_arm64(a &Real, b &Real, len int) f32
